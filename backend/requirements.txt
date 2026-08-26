@@ -1,0 +1,9 @@
+fastapi>=0.118
+uvicorn[standard]>=0.36
+pydantic>=2.12
+pydantic-settings>=2.11
+
+# LLM providers — you only need the one you set as LLM_PROVIDER in .env
+anthropic>=0.69
+openai>=1.109
+ddgs>=9.15

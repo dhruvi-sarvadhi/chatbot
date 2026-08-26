@@ -1,0 +1,23 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" role="img" aria-label="Chatbot">
+  <!-- No tile: the bot is drawn in the app's accent colour on a transparent
+       background, with the eyes and smile cut out by the mask below. -->
+  <style>
+    svg { color: #4f46e5; }
+    @media (prefers-color-scheme: dark) {
+      svg { color: #7c74ff; }   /* the accent used by the app's dark theme */
+    }
+  </style>
+
+  <mask id="bot">
+    <!-- white = keep, black = cut away -->
+    <rect width="64" height="64" fill="#000"/>
+    <circle cx="32" cy="10.5" r="4" fill="#fff"/>
+    <rect x="9" y="16" width="46" height="34" rx="11" fill="#fff"/>
+    <circle cx="23.5" cy="30" r="5" fill="#000"/>
+    <circle cx="40.5" cy="30" r="5" fill="#000"/>
+    <path d="M23.5 40c2.3 2.7 5.2 4 8.5 4s6.2-1.3 8.5-4"
+          fill="none" stroke="#000" stroke-width="4" stroke-linecap="round"/>
+  </mask>
+
+  <rect width="64" height="64" fill="currentColor" mask="url(#bot)"/>
+</svg>
