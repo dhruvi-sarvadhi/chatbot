@@ -6,6 +6,7 @@ Interactive docs:  http://127.0.0.1:8000/docs
 
 import json
 import logging
+from dataclasses import asdict
 from datetime import datetime
 from functools import lru_cache
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
@@ -16,6 +17,7 @@ from fastapi.responses import StreamingResponse
 
 from .catalog import PROVIDERS
 from .config import get_settings
+from .pricing import estimate_cost
 from .providers import GenerationConfig, get_provider
 from .schemas import (
     ChatConfig,
@@ -113,6 +115,7 @@ def _resolve(cfg: ChatConfig, ctx: ClientContext) -> tuple[str, GenerationConfig
         max_tokens=cfg.max_tokens or settings.max_tokens,
         effort=cfg.effort or settings.effort,
         web_search=cfg.web_search,
+        search_backend=cfg.search_backend,
     )
 
 
@@ -148,6 +151,7 @@ def config() -> ConfigResponse:
 
     return ConfigResponse(
         providers=providers,
+        tavily_configured=bool(settings.tavily_api_key),
         defaults=ChatConfig(
             provider=settings.llm_provider,
             model=settings.active_model,
@@ -206,7 +210,8 @@ def chat_stream(request: ChatRequest) -> StreamingResponse:
                             "usage": {
                                 "input_tokens": chunk.input_tokens,
                                 "output_tokens": chunk.output_tokens,
-                            }
+                            },
+                            "metrics": _metrics_payload(chunk.metrics),
                         }
                     )
                 elif chunk.trace:
@@ -227,6 +232,19 @@ def chat_stream(request: ChatRequest) -> StreamingResponse:
         media_type="text/event-stream",
         headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
     )
+
+
+def _metrics_payload(metrics) -> dict | None:
+    """Per-turn analytics for the UI, with the cost worked out server-side."""
+    if metrics is None:
+        return None
+    data = asdict(metrics)
+    # None rather than 0 when the model is not in the pricing table, so the UI
+    # can show "—" instead of implying the turn was free.
+    data["cost_usd"] = estimate_cost(
+        metrics.model, metrics.input_tokens, metrics.output_tokens
+    )
+    return data
 
 
 def _sse(payload: dict) -> str:

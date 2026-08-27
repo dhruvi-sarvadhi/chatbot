@@ -28,6 +28,11 @@ class Settings(BaseSettings):
     openai_api_key: str = ""
     openai_model: str = "gpt-4o-mini"
 
+    # Web search. Tavily is a search API built for LLMs — it returns extracted
+    # text and a synthesized answer, so no page-fetching is needed. Leave it
+    # empty and search falls back to DuckDuckGo, which needs no key.
+    tavily_api_key: str = ""
+
     # Generation
     system_prompt: str = "You are a friendly, concise assistant."
     max_tokens: int = 2048

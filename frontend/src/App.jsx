@@ -2,6 +2,7 @@ import { useEffect, useRef, useState } from 'react'
 import ChatInput from './components/ChatInput.jsx'
 import ConfigPanel from './components/ConfigPanel.jsx'
 import DownloadMenu from './components/DownloadMenu.jsx'
+import RunDetails from './components/RunDetails.jsx'
 import Message from './components/Message.jsx'
 import TypingDots from './components/TypingDots.jsx'
 import { getConfig, sendChat, streamChat } from './api.js'
@@ -28,10 +29,14 @@ export default function App() {
   const [error, setError] = useState(null)
   const [streaming, setStreaming] = useState(true)
   const [usage, setUsage] = useState(null)
+  // Every turn's metrics, so the panel can total the session.
+  const [runs, setRuns] = useState([])
   const [panelOpen, setPanelOpen] = useState(false)
   const [atBottom, setAtBottom] = useState(true)
   // Text pushed into the composer by a Reply click.
   const [insert, setInsert] = useState(null)
+  // Index of the message whose run details are open, or null.
+  const [detailsFor, setDetailsFor] = useState(null)
   // 'system' | 'light' | 'dark' — index.html already applied the saved value.
   const [theme, setTheme] = useState(readTheme)
 
@@ -165,7 +170,16 @@ export default function App() {
               next[next.length - 1] = { ...next[next.length - 1], meta: meta.model }
               return next
             }),
-          onUsage: setUsage,
+          onUsage: (u, metrics) => {
+            setUsage(u)
+            if (!metrics) return
+            setRuns((prev) => [...prev, metrics])
+            setMessages((prev) => {
+              const next = [...prev]
+              next[next.length - 1] = { ...next[next.length - 1], metrics }
+              return next
+            })
+          },
         })
       } else {
         const data = await sendChat(forModel, config)
@@ -202,7 +216,7 @@ export default function App() {
             ...last,
             thinkingActive: false,
             thinkingMs: thinkStart === null ? undefined : performance.now() - thinkStart,
-            search: last.search === 'searching' ? 'searched' : last.search,
+            search: last.search === 'searching' ? 'searched:—:0' : last.search,
           },
         ]
       })
@@ -230,6 +244,7 @@ export default function App() {
           applyTheme(next)
         }}
         usage={usage}
+        runs={runs}
         open={panelOpen}
         onChange={setConfig}
         onReset={() => setConfig(schema.defaults)}
@@ -282,7 +297,7 @@ export default function App() {
               disabled={!messages.length}
             />
 
-            <button className="ghost" onClick={() => { setMessages([]); setError(null); setUsage(null) }}>
+            <button className="ghost" onClick={() => { setMessages([]); setError(null); setUsage(null); setRuns([]) }}>
               Clear
             </button>
           </div>
@@ -317,10 +332,12 @@ export default function App() {
               thinkingMs={m.thinkingMs}
               search={m.search}
               trace={m.trace}
+              metrics={m.metrics}
               pending={busy && i === messages.length - 1 && m.role === 'assistant'}
               liked={m.liked}
               onLike={() => toggleLike(i)}
               onReply={handleReply}
+              onInfo={() => setDetailsFor(i)}
             />
           ))}
 
@@ -348,6 +365,14 @@ export default function App() {
         </footer>
       </div>
 
+      <RunDetails
+        open={detailsFor != null}
+        run={detailsFor != null ? messages[detailsFor]?.metrics : null}
+        trace={detailsFor != null ? messages[detailsFor]?.trace : null}
+        runs={runs}
+        onClose={() => setDetailsFor(null)}
+      />
+
       {panelOpen && <div className="scrim" onClick={() => setPanelOpen(false)} />}
     </div>
   )
@@ -367,6 +392,8 @@ function describeChanges(before, after) {
   if (before.provider !== after.provider) parts.push(`provider → ${after.provider}`)
   if (before.model !== after.model) parts.push(`model → ${after.model}`)
   if (before.effort !== after.effort) parts.push(`effort → ${after.effort}`)
+  if (before.search_backend !== after.search_backend)
+    parts.push(`search backend → ${after.search_backend}`)
   if (before.web_search !== after.web_search)
     parts.push(`web search → ${after.web_search ? 'on' : 'off'}`)
   if (before.max_tokens !== after.max_tokens) parts.push(`max tokens → ${after.max_tokens}`)

@@ -1,11 +1,12 @@
 """Claude (Anthropic) provider — calls the Messages API with the official SDK."""
 
+import time
 from collections.abc import Iterator
 
 import anthropic
 
 from ..catalog import model_caps
-from .base import ChatProvider, ChatResult, GenerationConfig, StreamChunk
+from .base import ChatProvider, ChatResult, GenerationConfig, StreamChunk, TurnMetrics
 
 # Server-side refusal fallbacks: if a safety classifier declines the request,
 # Anthropic re-routes it to a suitable fallback model instead of returning an
@@ -85,17 +86,41 @@ class ClaudeProvider(ChatProvider):
     def stream(self, messages: list[dict], cfg: GenerationConfig) -> Iterator[StreamChunk]:
         params = self._params(messages, cfg)
         started = False
+        t0 = time.perf_counter()
 
         try:
             for chunk in self._stream_with(self.client.beta.messages, params):
                 started = True
-                yield chunk
+                yield self._stamp(chunk, params, cfg, t0)
         except anthropic.BadRequestError:
             # Only safe to restart if nothing reached the browser yet — a retry
             # after the first chunk would replay text the user already saw.
             if started:
                 raise
-            yield from self._stream_with(self.client.messages, _without_beta(params))
+            for chunk in self._stream_with(self.client.messages, _without_beta(params)):
+                yield self._stamp(chunk, params, cfg, t0)
+
+    def _stamp(self, chunk: StreamChunk, params: dict, cfg: GenerationConfig, t0: float) -> StreamChunk:
+        """Attach the turn's metrics to the final chunk.
+
+        Search runs on Anthropic's side here, so there is no tool time to
+        report — the whole wall clock is time spent waiting on the model.
+        """
+        if not chunk.done:
+            return chunk
+        elapsed = round((time.perf_counter() - t0) * 1000)
+        chunk.metrics = TurnMetrics(
+            provider=self.name,
+            model=params["model"],
+            effort=cfg.effort if "output_config" in params else "",
+            input_tokens=chunk.input_tokens or 0,
+            output_tokens=chunk.output_tokens or 0,
+            model_requests=1,
+            total_ms=elapsed,
+            model_ms=elapsed,
+            search_backend="anthropic-hosted" if params.get("tools") else "",
+        )
+        return chunk
 
     @staticmethod
     def _stream_with(messages_api, params: dict) -> Iterator[StreamChunk]:

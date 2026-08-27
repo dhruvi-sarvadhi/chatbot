@@ -7,3 +7,4 @@ pydantic-settings>=2.11
 anthropic>=0.69
 openai>=1.109
 ddgs>=9.15
+tavily-python>=0.5

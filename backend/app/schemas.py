@@ -9,9 +9,11 @@ from typing import Literal
 from pydantic import BaseModel, Field
 
 from .catalog import EFFORT_LEVELS
+from .tools import BACKENDS as SEARCH_BACKENDS
 
 Provider = Literal["claude", "openai"]
 Effort = Literal["low", "medium", "high", "xhigh", "max"]
+SearchBackend = Literal["auto", "tavily", "duckduckgo", "compare"]
 
 
 class Message(BaseModel):
@@ -30,6 +32,8 @@ class ChatConfig(BaseModel):
     model: str | None = Field(default=None, max_length=100)
     # Let the model look things up when the answer needs current facts.
     web_search: bool = False
+    # Which search backend runs. "compare" runs both and times them.
+    search_backend: SearchBackend = "auto"
     system_prompt: str | None = Field(default=None, max_length=8000)
     max_tokens: int | None = Field(default=None, ge=64, le=32000)
     effort: Effort | None = None
@@ -99,5 +103,8 @@ class ConfigResponse(BaseModel):
 
     providers: list[ProviderOption]
     effort_levels: list[str] = EFFORT_LEVELS
+    search_backends: list[str] = SEARCH_BACKENDS
+    # False when no TAVILY_API_KEY is set, so the panel can say why.
+    tavily_configured: bool = False
     defaults: ChatConfig
     max_tokens_limit: int = 32000

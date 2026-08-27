@@ -47,7 +47,8 @@ export async function sendChat(messages, config) {
  *   onTrace(step)   — one entry of the agent loop, for the debug panel
  *   onDelta(text)   — the model wrote a bit more
  *   onMeta({provider, model}) — which model actually answered
- *   onUsage({input_tokens, output_tokens}) — token cost of the turn
+ *   onUsage({input_tokens, output_tokens}, metrics) — what the turn cost:
+ *                     tokens, timing split, tool calls, estimated dollars
  *
  * Reasoning always arrives before the answer, so the first onDelta is also
  * the signal that thinking is over.
@@ -91,7 +92,7 @@ export async function streamChat(
       if (event.thinking) onThinking?.(event.thinking)
       if (event.delta) onDelta?.(event.delta)
       if (event.meta) onMeta?.(event.meta)
-      if (event.usage) onUsage?.(event.usage)
+      if (event.usage) onUsage?.(event.usage, event.metrics ?? null)
     }
   }
 }

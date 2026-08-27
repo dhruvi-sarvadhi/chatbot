@@ -48,13 +48,42 @@ CLAUDE_MODELS = [
     },
 ]
 
-# Everything here goes through the Responses API, which supports web search on
-# every model. Only the GPT-5 family reasons; the GPT-4 models answer directly.
+# Everything here goes through the Responses API, so every model below can be
+# offered our web_search function tool. Only the GPT-5 family and the o-series
+# accept the `reasoning` parameter — sending it to a GPT-4 model is a 400.
+#
+# Deliberately not listed: the *-chat-latest variants, which accept neither
+# reasoning nor tools, and the -pro tiers, which are slow and costly enough
+# that they belong in the free-text box rather than a dropdown.
 OPENAI_MODELS = [
     {
         "id": "gpt-5.4-mini",
         "label": "GPT-5.4 mini",
-        "hint": "Fast, reasons",
+        "hint": "Fast, reasons — good default",
+        "supports_effort": True,
+        "supports_thinking": True,
+        "supports_search": True,
+    },
+    {
+        "id": "gpt-5.5",
+        "label": "GPT-5.5",
+        "hint": "Newest flagship, slowest",
+        "supports_effort": True,
+        "supports_thinking": True,
+        "supports_search": True,
+    },
+    {
+        "id": "gpt-5.4",
+        "label": "GPT-5.4",
+        "hint": "Flagship, strong reasoning",
+        "supports_effort": True,
+        "supports_thinking": True,
+        "supports_search": True,
+    },
+    {
+        "id": "gpt-5.4-nano",
+        "label": "GPT-5.4 nano",
+        "hint": "Cheapest that still reasons",
         "supports_effort": True,
         "supports_thinking": True,
         "supports_search": True,
@@ -62,15 +91,39 @@ OPENAI_MODELS = [
     {
         "id": "gpt-5-mini",
         "label": "GPT-5 mini",
-        "hint": "Reasons, cheaper",
+        "hint": "Previous generation, reasons",
         "supports_effort": True,
         "supports_thinking": True,
         "supports_search": True,
     },
     {
+        "id": "o4-mini",
+        "label": "o4 mini",
+        "hint": "o-series reasoning model",
+        "supports_effort": True,
+        "supports_thinking": True,
+        "supports_search": True,
+    },
+    {
+        "id": "gpt-4o",
+        "label": "GPT-4o",
+        "hint": "Strong, instant — no reasoning",
+        "supports_effort": False,
+        "supports_thinking": False,
+        "supports_search": True,
+    },
+    {
         "id": "gpt-4o-mini",
         "label": "GPT-4o mini",
-        "hint": "Fast, cheap — no reasoning",
+        "hint": "Fastest and cheapest overall",
+        "supports_effort": False,
+        "supports_thinking": False,
+        "supports_search": True,
+    },
+    {
+        "id": "gpt-4.1",
+        "label": "GPT-4.1",
+        "hint": "Long context — no reasoning",
         "supports_effort": False,
         "supports_thinking": False,
         "supports_search": True,
@@ -78,7 +131,7 @@ OPENAI_MODELS = [
     {
         "id": "gpt-4.1-mini",
         "label": "GPT-4.1 mini",
-        "hint": "Long context — no reasoning",
+        "hint": "Long context, fast",
         "supports_effort": False,
         "supports_thinking": False,
         "supports_search": True,

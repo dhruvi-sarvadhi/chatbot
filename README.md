@@ -127,6 +127,7 @@ curl -X POST http://127.0.0.1:8000/api/chat \
 | [frontend/src/lib/highlight.js](frontend/src/lib/highlight.js) | Syntax highlighting, trimmed to 10 languages |
 | [frontend/src/components/MessageActions.jsx](frontend/src/components/MessageActions.jsx) | Copy / reply / like / share row |
 | [frontend/src/components/Clamped.jsx](frontend/src/components/Clamped.jsx) | Show more / show less for long questions |
+| [frontend/src/components/RunDetails.jsx](frontend/src/components/RunDetails.jsx) | The per-answer analytics drawer |
 | [frontend/src/lib/transcript.js](frontend/src/lib/transcript.js) | Markdown + JSON conversation export |
 | [backend/app/providers/claude.py](backend/app/providers/claude.py) | The actual Anthropic API call |
 | [backend/app/providers/openai_provider.py](backend/app/providers/openai_provider.py) | The actual OpenAI API call |
@@ -179,6 +180,13 @@ A long question is capped at about five lines with a **Show more** / **Show
 less** toggle, so one wall of text can't push the answer off screen. Short
 questions are untouched — the toggle only appears when the text really
 overflows.
+
+Every answer carries a **Details** (ⓘ) action that opens a right-hand drawer
+with the whole run: headline numbers, where the time went (model vs your own
+tools), what you paid for (input / cached / output / reasoning), plain-language
+findings, a per-model comparison across the session, and the step-by-step agent
+trace. The comparison is the point — one run's numbers mean little on their own,
+but against the other models you have tried they turn into a decision.
 
 Hovering a message reveals its actions — **copy** and **reply** on both
 questions and answers, plus **like** and **share** on answers. Reply quotes the

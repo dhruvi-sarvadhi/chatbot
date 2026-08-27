@@ -1,36 +1,79 @@
-"""Free web search, no API key, via DuckDuckGo.
+"""Web search for the model, with two interchangeable backends.
 
-Two steps, because one is not enough. Search alone returns snippets — page
-descriptions a crawler wrote, which say "find the latest AAPL quote here"
-rather than giving a number. A model handed only those correctly concludes it
-does not know the price, and says so.
+Tavily is a search API built for LLMs: it returns text already extracted from
+the pages plus a synthesized answer, so one call is enough. DuckDuckGo is the
+no-key fallback, and it needs a second step — its results are only page
+*descriptions*, so the pages have to be opened and read before there is an
+actual number to hand the model.
 
-So this reads the top results too. Fetching the page is what turns "here is
-where the answer lives" into the answer, and it is the step the paid hosted
-search tools are really charging for.
+That second step is the whole difference. A model given only descriptions
+correctly answers "I cannot access real-time data", because nothing it was
+given contains the answer.
 """
 
 import logging
+import time
+from dataclasses import dataclass, field
 
-from ddgs import DDGS
+from ..config import get_settings
 
 log = logging.getLogger("chatbot")
 
-MAX_RESULTS = 5
+# ── Tavily ──────────────────────────────────────────────────────────────
+# "basic" costs half of "advanced" and, in testing, answered stock and
+# weather queries just as well while being about a second faster.
+TAVILY_DEPTH = "basic"
+TAVILY_RESULTS = 5
+
+# ── DuckDuckGo fallback ─────────────────────────────────────────────────
+DDG_RESULTS = 5
 # How many pages we want to come back with. Plenty of sites time out or block
 # crawlers, so we keep trying further down the list rather than giving up on
-# the first two — landing on snippets only is what makes the model answer
-# "I cannot access real-time data", which is the failure this tool exists to
-# prevent.
+# the first two.
 PAGES_WANTED = 2
 PAGES_TO_TRY = 4
 MAX_SNIPPET = 300
-# Enough to carry a quote, a headline and its surrounding paragraph; small
-# enough that two pages do not crowd out the conversation.
 MAX_PAGE_CHARS = 3000
 # ddgs rotates across search backends and any one of them can time out. A
 # second attempt usually lands on a different backend and succeeds.
 SEARCH_ATTEMPTS = 3
+
+FRESHNESS_NOTE = (
+    "Cite the source URL, and say when the figure is from if the answer is "
+    "time-sensitive."
+)
+
+# Which backend a request may ask for. "compare" runs both and times them,
+# which costs twice as much and is purely a learning tool — the model is still
+# only shown one of the two results.
+BACKENDS = ["auto", "tavily", "duckduckgo", "compare"]
+
+
+@dataclass
+class SearchRun:
+    """What one backend did, for the trace panel."""
+
+    backend: str
+    ms: int
+    chars: int
+    sources: int
+    pages_read: int | None = None  # None where the backend does not fetch pages
+    ok: bool = True
+
+
+@dataclass
+class SearchOutcome:
+    """The text handed to the model, plus what it cost to get it."""
+
+    text: str
+    used: str
+    runs: list[SearchRun] = field(default_factory=list)
+
+
+def _count_sources(text: str) -> int:
+    """Numbered result lines, which both backends emit in the same shape."""
+    return sum(1 for line in text.splitlines() if line[:1].isdigit() and ". " in line[:5])
+
 
 # What the model sees. Not documentation — it is the only thing the model
 # reads when deciding whether to call this, so it names the cases that matter.
@@ -58,6 +101,44 @@ SEARCH_TOOL_SCHEMA = {
 }
 
 
+def _tavily(query: str, api_key: str) -> str | None:
+    """Tavily's answer plus its sources, or None if the call did not work.
+
+    None means "try the other backend" — a failed paid search should degrade
+    to the free one, not to no search at all.
+    """
+    try:
+        from tavily import TavilyClient
+
+        data = TavilyClient(api_key).search(
+            query=query,
+            search_depth=TAVILY_DEPTH,
+            max_results=TAVILY_RESULTS,
+            include_answer="advanced",
+        )
+    except Exception as exc:  # noqa: BLE001 — fall through to DuckDuckGo
+        log.warning("tavily search failed for %r: %s", query, exc)
+        return None
+
+    results = data.get("results") or []
+    if not results and not data.get("answer"):
+        return None
+
+    out = [f"Search results for {query!r} (via Tavily):", ""]
+    if data.get("answer"):
+        # Tavily's own summary of what it found. Useful, but still a summary —
+        # the sources below are what the model should quote from.
+        out += ["Summary:", data["answer"], ""]
+
+    for i, r in enumerate(results, 1):
+        out.append(f"{i}. {r.get('title', '(untitled)')} — {r.get('url', '')}")
+        out.append(f"   {(r.get('content') or '')[:MAX_PAGE_CHARS]}")
+        out.append("")
+
+    out.append(FRESHNESS_NOTE)
+    return "\n".join(out)
+
+
 def _read(url: str) -> str:
     """Page text, or "" if it cannot be fetched.
 
@@ -66,25 +147,24 @@ def _read(url: str) -> str:
     snippet for that result.
     """
     try:
+        from ddgs import DDGS
+
         return str(DDGS().extract(url).get("content", ""))
     except Exception as exc:  # noqa: BLE001 — one dead page is not a failure
         log.info("could not read %s: %s", url, type(exc).__name__)
         return ""
 
 
-def web_search(query: str) -> str:
-    """Run the search and format everything found as plain text for the model.
+def _duckduckgo(query: str) -> str:
+    """Free, no key: search, then open the top results and read them."""
+    from ddgs import DDGS
 
-    Returns a string in every case, including failure. A tool that raises
-    would abort the whole turn; a tool that reports "search failed" lets the
-    model tell the user it could not look it up, which is a better answer.
-    """
     results, last_error = [], None
     for attempt in range(SEARCH_ATTEMPTS):
         try:
-            results = DDGS().text(query, max_results=MAX_RESULTS)
+            results = DDGS().text(query, max_results=DDG_RESULTS)
             break
-        except Exception as exc:  # noqa: BLE001 — the model handles this, not us
+        except Exception as exc:  # noqa: BLE001 — the model handles this
             last_error = exc
             log.info("search attempt %d failed for %r: %s", attempt + 1, query, exc)
 
@@ -95,7 +175,7 @@ def web_search(query: str) -> str:
     if not results:
         return f"No results for {query!r}."
 
-    out = [f"Search results for {query!r}:", ""]
+    out = [f"Search results for {query!r} (via DuckDuckGo):", ""]
     for i, r in enumerate(results, 1):
         out.append(f"{i}. {r.get('title', '(untitled)')} — {r.get('href', '')}")
         out.append(f"   {r.get('body', '')[:MAX_SNIPPET]}")
@@ -116,9 +196,69 @@ def web_search(query: str) -> str:
     if not read:
         out.append("(None of the pages could be opened — only the snippets above are available.)")
 
-    out.append(
-        "Page content is live but noisy — navigation and adverts come with it. "
-        "Pull the figure the user asked for, cite the source URL, and say when "
-        "it is from if the answer is time-sensitive."
-    )
+    out.append("Page content is live but noisy — navigation and adverts come with it. " + FRESHNESS_NOTE)
     return "\n".join(out)
+
+
+def _timed(backend: str, fn, query: str) -> tuple[str | None, SearchRun]:
+    """Run one backend and measure it, so the two can be compared honestly."""
+    start = time.perf_counter()
+    text = fn(query)
+    ms = round((time.perf_counter() - start) * 1000)
+    ok = bool(text) and not str(text).startswith("Search failed")
+    return text, SearchRun(
+        backend=backend,
+        ms=ms,
+        chars=len(text or ""),
+        sources=_count_sources(text or ""),
+        pages_read=(text or "").count("--- Page content") if backend == "duckduckgo" else None,
+        ok=ok,
+    )
+
+
+def run_search(query: str, backend: str = "auto") -> SearchOutcome:
+    """Search with the requested backend, reporting what it cost.
+
+    Never raises: a tool that raises aborts the whole turn, while a tool that
+    says "search failed" lets the model tell the user it could not look it up.
+    """
+    key = get_settings().tavily_api_key
+    if backend not in BACKENDS:
+        backend = "auto"
+    # Asking for Tavily without a key is a configuration mistake, not a reason
+    # to answer nothing — fall back rather than fail.
+    if backend in ("auto", "tavily") and not key:
+        backend = "duckduckgo"
+    if backend == "compare" and not key:
+        backend = "duckduckgo"
+
+    runs: list[SearchRun] = []
+
+    if backend == "duckduckgo":
+        text, run = _timed("duckduckgo", _duckduckgo, query)
+        return SearchOutcome(text=text, used="duckduckgo", runs=[run])
+
+    if backend == "compare":
+        # Both, sequentially, so the timings are not fighting for bandwidth.
+        tav, tav_run = _timed("tavily", lambda q: _tavily(q, key), query)
+        ddg, ddg_run = _timed("duckduckgo", _duckduckgo, query)
+        runs = [tav_run, ddg_run]
+        if tav is not None:
+            return SearchOutcome(text=tav, used="tavily", runs=runs)
+        return SearchOutcome(text=ddg, used="duckduckgo", runs=runs)
+
+    # auto / tavily
+    text, run = _timed("tavily", lambda q: _tavily(q, key), query)
+    runs.append(run)
+    if text is not None:
+        return SearchOutcome(text=text, used="tavily", runs=runs)
+
+    log.info("tavily unavailable, falling back to DuckDuckGo for %r", query)
+    text, run = _timed("duckduckgo", _duckduckgo, query)
+    runs.append(run)
+    return SearchOutcome(text=text, used="duckduckgo", runs=runs)
+
+
+def web_search(query: str, backend: str = "auto") -> str:
+    """Plain-text search, for callers that do not want the timings."""
+    return run_search(query, backend).text

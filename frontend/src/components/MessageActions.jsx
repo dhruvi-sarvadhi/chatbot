@@ -4,7 +4,7 @@ import { copyText } from '../lib/clipboard.js'
 // Small action row under a bubble.
 //   questions — copy, reply
 //   answers   — copy, reply, like, share
-export default function MessageActions({ text, isUser, liked, onLike, onReply }) {
+export default function MessageActions({ text, isUser, liked, onLike, onReply, onInfo }) {
   const [copied, setCopied] = useState(false)
   const [shared, setShared] = useState(null)
 
@@ -59,6 +59,13 @@ export default function MessageActions({ text, isUser, liked, onLike, onReply })
             <ShareIcon />
             <span className="acts__label">{shared ?? 'Share'}</span>
           </button>
+
+          {onInfo && (
+            <button className="acts__btn" onClick={onInfo} title="Run details" aria-label="Run details">
+              <InfoIcon />
+              <span className="acts__label">Details</span>
+            </button>
+          )}
         </>
       )}
     </div>
@@ -107,6 +114,16 @@ function LikeIcon({ filled }) {
         {...stroke}
         fill={filled ? 'currentColor' : 'none'}
       />
+    </Icon>
+  )
+}
+
+function InfoIcon() {
+  return (
+    <Icon>
+      <circle cx="12" cy="12" r="8.5" {...stroke} />
+      <path d="M12 11v5.5" {...stroke} />
+      <circle cx="12" cy="8" r="1" fill="currentColor" stroke="none" />
     </Icon>
   )
 }

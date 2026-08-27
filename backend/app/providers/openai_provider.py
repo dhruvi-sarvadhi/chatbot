@@ -19,8 +19,8 @@ from collections.abc import Iterator
 from openai import OpenAI
 
 from ..catalog import model_caps
-from ..tools import SEARCH_TOOL_SCHEMA, web_search
-from .base import ChatProvider, ChatResult, GenerationConfig, StreamChunk
+from ..tools import SEARCH_TOOL_SCHEMA, run_search
+from .base import ChatProvider, ChatResult, GenerationConfig, StreamChunk, TurnMetrics
 
 log = logging.getLogger("chatbot")
 
@@ -83,7 +83,8 @@ class OpenAIProvider(ChatProvider):
         return item
 
     @staticmethod
-    def _run_tools(output, items: list, clock=None) -> Iterator[StreamChunk]:
+    def _run_tools(output, items: list, clock=None, backend: str = "auto",
+                   metrics: TurnMetrics | None = None) -> Iterator[StreamChunk]:
         """Execute every tool call, appending results to `items`.
 
         Yields trace chunks as it goes, so the UI can show the call before the
@@ -115,21 +116,36 @@ class OpenAIProvider(ChatProvider):
                     "ms": clock(),
                 })
 
+            outcome = None
+            tool_started = time.perf_counter()
+            if metrics is not None:
+                metrics.tool_calls += 1
             if result is None:
-                result = (
-                    web_search(args.get("query", ""))
-                    if block.name == "web_search"
-                    else f"Unknown tool: {block.name}"
-                )
+                if block.name == "web_search":
+                    outcome = run_search(args.get("query", ""), backend)
+                    result = outcome.text
+                else:
+                    result = f"Unknown tool: {block.name}"
+
+            if metrics is not None:
+                metrics.tool_ms += round((time.perf_counter() - tool_started) * 1000)
+                if outcome:
+                    metrics.search_backend = outcome.used
 
             if clock:
-                pages = result.count("--- Page content")
                 yield StreamChunk(trace={
                     "step": "tool_result",
-                    "label": f"{len(result):,} chars · {pages} page(s) read",
-                    "detail": result[:TRACE_PREVIEW],
+                    "label": _result_label(outcome, result),
+                    "detail": _result_detail(outcome, result),
                     "ms": clock(),
                 })
+                if outcome:
+                    # Surfaced outside the trace too, so the backend and its
+                    # cost are visible without opening the debug panel.
+                    won = next((r for r in outcome.runs if r.backend == outcome.used), None)
+                    yield StreamChunk(
+                        status=f"searched:{outcome.used}:{won.ms if won else 0}"
+                    )
 
             items.append(
                 {"type": "function_call_output", "call_id": block.call_id, "output": result}
@@ -158,7 +174,7 @@ class OpenAIProvider(ChatProvider):
             results = []
             # Same executor as the streaming path; without a clock it yields
             # nothing, so this just runs the tools.
-            for _ in self._run_tools(response.output, results):
+            for _ in self._run_tools(response.output, results, backend=cfg.search_backend):
                 pass
             if not results:
                 return ChatResult(
@@ -196,6 +212,12 @@ class OpenAIProvider(ChatProvider):
         t0 = time.perf_counter()
         clock = lambda: round((time.perf_counter() - t0) * 1000)  # noqa: E731
 
+        metrics = TurnMetrics(
+            provider=self.name,
+            model=params["model"],
+            effort=cfg.effort if "reasoning" in params else "",
+        )
+
         for turn in range(MAX_TOOL_TURNS + 1):
             tools = params.get("tools") or []
             yield StreamChunk(trace={
@@ -207,6 +229,9 @@ class OpenAIProvider(ChatProvider):
                 ),
                 "ms": clock(),
             })
+
+            metrics.model_requests += 1
+            model_started = time.perf_counter()
 
             with self.client.responses.stream(**{**params, "input": convo}) as stream:
                 for event in stream:
@@ -222,9 +247,18 @@ class OpenAIProvider(ChatProvider):
                                 yield StreamChunk(status="searching")
                 final = stream.get_final_response()
 
+            metrics.model_ms += round((time.perf_counter() - model_started) * 1000)
+
             if final.usage:
                 sent += final.usage.input_tokens
                 received += final.usage.output_tokens
+                metrics.input_tokens += final.usage.input_tokens
+                metrics.output_tokens += final.usage.output_tokens
+                # Nested details are absent on some models, so read defensively.
+                out_detail = getattr(final.usage, "output_tokens_details", None)
+                in_detail = getattr(final.usage, "input_tokens_details", None)
+                metrics.reasoning_tokens += getattr(out_detail, "reasoning_tokens", 0) or 0
+                metrics.cached_tokens += getattr(in_detail, "cached_tokens", 0) or 0
 
             yield StreamChunk(trace={
                 "step": "response",
@@ -237,7 +271,7 @@ class OpenAIProvider(ChatProvider):
             })
 
             results = []
-            yield from self._run_tools(final.output, results, clock)
+            yield from self._run_tools(final.output, results, clock, cfg.search_backend, metrics)
             if not results:
                 yield StreamChunk(trace={
                     "step": "answer",
@@ -247,7 +281,6 @@ class OpenAIProvider(ChatProvider):
                 })
                 break
 
-            yield StreamChunk(status="searched")
             convo += [self._echo(b) for b in final.output] + results
         else:
             log.warning("gave up after %d tool turns", MAX_TOOL_TURNS)
@@ -259,10 +292,40 @@ class OpenAIProvider(ChatProvider):
             })
             yield StreamChunk(text="\n\n(Stopped after too many lookups.)")
 
-        yield StreamChunk(done=True, input_tokens=sent, output_tokens=received)
+        metrics.total_ms = clock()
+        yield StreamChunk(
+            done=True, input_tokens=sent, output_tokens=received, metrics=metrics
+        )
 
     def list_models(self) -> set[str]:
         try:
             return {m.id for m in self.client.models.list()}
         except Exception:  # noqa: BLE001 — availability info is a nice-to-have
             return set()
+
+
+def _result_label(outcome, result: str) -> str:
+    """One line summarising what the search cost."""
+    if outcome is None:
+        return f"{len(result):,} chars"
+    parts = [f"{r.backend} {r.ms / 1000:.1f}s" for r in outcome.runs]
+    return f"{' vs '.join(parts)} · {outcome.used} used"
+
+
+def _result_detail(outcome, result: str) -> str:
+    """A comparison table when two backends ran, then what the model got."""
+    if outcome is None:
+        return result[:TRACE_PREVIEW]
+
+    rows = [f"{'backend':<12}{'time':>8}{'chars':>9}{'sources':>9}{'pages':>7}"]
+    for r in outcome.runs:
+        pages = "—" if r.pages_read is None else str(r.pages_read)
+        status = "" if r.ok else "  (failed)"
+        rows.append(
+            f"{r.backend:<12}{r.ms / 1000:>7.2f}s{r.chars:>9,}{r.sources:>9}{pages:>7}{status}"
+        )
+    rows.append("")
+    rows.append(f"Fed to the model: {outcome.used}")
+    rows.append("")
+    rows.append(result[:TRACE_PREVIEW])
+    return "\n".join(rows)

@@ -1,12 +1,20 @@
 import Clamped from './Clamped.jsx'
 import Markdown from './Markdown.jsx'
 import MessageActions from './MessageActions.jsx'
-import AgentTrace from './AgentTrace.jsx'
 import BotLogo from './BotLogo.jsx'
 import Reasoning from './Reasoning.jsx'
 
 // One chat bubble. `role` is "user", "assistant", or "note" (a local-only
 // line marking a configuration change — it is never sent to the model).
+// "searching" while it runs; "searched:tavily:2310" once a backend has
+// answered, so the row itself reports which one ran and how long it took.
+function describeSearch(state) {
+  if (state === 'searching') return 'Searching the web…'
+  const [, backend, ms] = state.split(':')
+  if (!backend) return 'Searched the web'
+  return `Searched via ${backend} · ${(Number(ms) / 1000).toFixed(1)}s`
+}
+
 export default function Message({
   role,
   content,
@@ -14,12 +22,14 @@ export default function Message({
   pending,
   search,
   trace,
+  metrics,
   thinking,
   thinkingActive,
   thinkingMs,
   liked,
   onLike,
   onReply,
+  onInfo,
 }) {
   if (role === 'note') {
     return <div className="note">{content}</div>
@@ -44,7 +54,7 @@ export default function Message({
         {!isUser && search && (
           <div className={`search ${search === 'searching' ? 'search--live' : ''}`}>
             <span className="search__glyph" aria-hidden="true">🌐</span>
-            {search === 'searching' ? 'Searching the web…' : 'Searched the web'}
+            {describeSearch(search)}
           </div>
         )}
 
@@ -73,11 +83,9 @@ export default function Message({
             liked={liked}
             onLike={onLike}
             onReply={onReply}
+            onInfo={!isUser && metrics ? onInfo : undefined}
           />
         )}
-
-        {/* Below the answer: this is a debugging aid, not part of the reply. */}
-        {!isUser && !pending && <AgentTrace steps={trace} />}
 
         {/* The model label belongs to an answer, so it waits for one. */}
         {meta && content && <div className="msg__meta">{meta}</div>}

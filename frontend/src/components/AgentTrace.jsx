@@ -19,8 +19,8 @@ const STEPS = {
 
 const ms = (n) => (n < 1000 ? `${n}ms` : `${(n / 1000).toFixed(1)}s`)
 
-export default function AgentTrace({ steps }) {
-  const [open, setOpen] = useState(false)
+export default function AgentTrace({ steps, defaultOpen = false }) {
+  const [open, setOpen] = useState(defaultOpen)
   if (!steps?.length) return null
 
   const total = steps[steps.length - 1].ms
