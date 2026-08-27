@@ -38,6 +38,19 @@ class Settings(BaseSettings):
     max_tokens: int = 2048
     effort: Literal["low", "medium", "high", "xhigh", "max"] = "low"
 
+    # ── Database ────────────────────────────────────────────────────────
+    # Where conversations are stored. SQLAlchemy URL; the app creates the
+    # database and its tables on first start if they are not there yet.
+    database_url: str = "postgresql+psycopg://postgres@localhost:5432/chatbot"
+    # Log every statement — noisy, but the fastest way to see what the ORM
+    # actually sent when a query behaves oddly.
+    db_echo: bool = False
+    db_pool_size: int = 5
+    db_max_overflow: int = 10
+    # Turn off to run with no database at all: the chat still answers, it
+    # just remembers nothing.
+    persistence_enabled: bool = True
+
     # Server
     host: str = "127.0.0.1"
     port: int = 8000
@@ -46,6 +59,10 @@ class Settings(BaseSettings):
     @property
     def cors_origin_list(self) -> list[str]:
         return [o.strip() for o in self.cors_origins.split(",") if o.strip()]
+
+    @property
+    def db_name(self) -> str:
+        return self.database_url.rsplit("/", 1)[-1].split("?")[0]
 
     @property
     def active_model(self) -> str:

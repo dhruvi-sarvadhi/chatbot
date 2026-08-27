@@ -5,7 +5,18 @@ import DownloadMenu from './components/DownloadMenu.jsx'
 import RunDetails from './components/RunDetails.jsx'
 import Message from './components/Message.jsx'
 import TypingDots from './components/TypingDots.jsx'
-import { getConfig, sendChat, streamChat } from './api.js'
+import SessionList from './components/SessionList.jsx'
+import {
+  deleteAllSessions,
+  deleteSession,
+  getConfig,
+  getSession,
+  likeMessage,
+  listSessions,
+  sendChat,
+  streamChat,
+  updateSession,
+} from './api.js'
 import { applyTheme, readTheme } from './lib/theme.js'
 
 const SUGGESTIONS = [
@@ -15,6 +26,9 @@ const SUGGESTIONS = [
 ]
 
 const STORAGE_KEY = 'chatbot.config'
+// Which conversation was open. Only the id lives here — the conversation
+// itself is in Postgres, so any browser with this id sees the same history.
+const SESSION_KEY = 'chatbot.session'
 
 export default function App() {
   // Everything the user can change on the left. It is sent with every request,
@@ -40,12 +54,29 @@ export default function App() {
   // 'system' | 'light' | 'dark' — index.html already applied the saved value.
   const [theme, setTheme] = useState(readTheme)
 
+  // ── Stored conversations ────────────────────────────────────────────────
+  // The transcript above is the live view; these are the rows in Postgres.
+  const [sessionId, setSessionId] = useState(() => localStorage.getItem(SESSION_KEY))
+  const [sessions, setSessions] = useState([])
+  const [historyLoading, setHistoryLoading] = useState(true)
+  // Set when the database is unreachable: the chat keeps working, the panel
+  // says why nothing is being saved rather than showing an empty list.
+  const [historyError, setHistoryError] = useState(null)
+  const [panelTab, setPanelTab] = useState('chats')
+
   const scrollRef = useRef(null)
   const prevConfig = useRef(null)
   // Read inside effects, where the `atBottom` state value would be stale.
   const atBottomRef = useRef(true)
+  // The id to send with the next turn. A ref as well as state because a turn
+  // started before the server assigned an id must pick it up mid-stream,
+  // where a state read would be a render behind.
+  const sessionRef = useRef(sessionId)
 
-  // Load the options + .env defaults once.
+  // Load the options + .env defaults once, then reopen the last conversation.
+  // Sequenced rather than run in parallel: both set `config`, and whichever
+  // resolved last would win — so a reopened chat could silently come back with
+  // the wrong model.
   useEffect(() => {
     getConfig()
       .then((data) => {
@@ -56,6 +87,10 @@ export default function App() {
         prevConfig.current = next
       })
       .catch((err) => setError(err.message))
+      .finally(() => {
+        const id = sessionRef.current
+        if (id) openSession(id, { silent: true })
+      })
   }, [])
 
   useEffect(() => {
@@ -91,9 +126,135 @@ export default function App() {
   }
 
   function toggleLike(index) {
+    const liked = !messages[index]?.liked
     setMessages((prev) =>
-      prev.map((m, i) => (i === index ? { ...m, liked: !m.liked } : m)),
+      prev.map((m, i) => (i === index ? { ...m, liked } : m)),
     )
+    // Persist it when the message has already been written to Postgres. A
+    // like on a still-streaming answer stays local until the row exists.
+    const id = messages[index]?.id
+    if (id) likeMessage(id, liked).catch(() => {})
+  }
+
+  // Load the sidebar. Independent of the config fetch — the list does not
+  // depend on the provider catalogue, so it should not wait for it.
+  useEffect(() => {
+    refreshHistory()
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [])
+
+  // Keep the id in the browser so a reload lands back in the same chat.
+  useEffect(() => {
+    if (sessionId) localStorage.setItem(SESSION_KEY, sessionId)
+    else localStorage.removeItem(SESSION_KEY)
+    sessionRef.current = sessionId
+  }, [sessionId])
+
+  async function refreshHistory() {
+    setHistoryLoading(true)
+    try {
+      setSessions(await listSessions())
+      setHistoryError(null)
+    } catch (err) {
+      // 503 from the API means Postgres is down. Say so in the panel rather
+      // than showing an empty list, which would look like "no history".
+      setHistoryError(err.message)
+    } finally {
+      setHistoryLoading(false)
+    }
+  }
+
+  /** Replay a stored conversation: transcript, reasoning, metrics and config. */
+  async function openSession(id, { silent = false } = {}) {
+    if (busy) return
+    try {
+      const data = await getSession(id)
+      setSessionId(data.id)
+      sessionRef.current = data.id
+      // Failed turns are kept in the database for debugging but are not
+      // replayed: the bubble would be empty, and the transcript should show
+      // the conversation, not its bookkeeping.
+      const turns = data.messages.filter((m) => !m.incomplete)
+      setMessages(turns.map(fromStored))
+      setRuns(turns.map((m) => m.metrics).filter(Boolean))
+      // Show the last turn's usage, so the strip is not blank on reopen.
+      const lastRun = [...turns].reverse().find((m) => m.metrics)?.metrics
+      setUsage(
+        lastRun
+          ? { input_tokens: lastRun.input_tokens, output_tokens: lastRun.output_tokens }
+          : null,
+      )
+      // Restore the settings this conversation was answered with, so the next
+      // turn continues it the same way rather than with whatever is in the panel.
+      setConfig((prev) => {
+        const next = {
+          ...prev,
+          provider: data.provider ?? prev?.provider,
+          model: data.model ?? prev?.model,
+          system_prompt: data.system_prompt ?? prev?.system_prompt,
+          effort: data.effort ?? prev?.effort,
+          max_tokens: data.max_tokens ?? prev?.max_tokens,
+          web_search: data.web_search,
+          search_backend: data.search_backend ?? prev?.search_backend,
+        }
+        prevConfig.current = next
+        return next
+      })
+      setError(null)
+      setPanelOpen(false)
+    } catch (err) {
+      // A stale id in localStorage is normal — drop it quietly on startup.
+      if (silent) {
+        setSessionId(null)
+        return
+      }
+      setError(err.message)
+    }
+  }
+
+  function newChat() {
+    // No row is created until the first message: an empty conversation in the
+    // sidebar that you never used is just clutter.
+    setSessionId(null)
+    sessionRef.current = null
+    setMessages([])
+    setUsage(null)
+    setRuns([])
+    setError(null)
+    setPanelOpen(false)
+  }
+
+  async function renameSession(id, title) {
+    // Optimistic — the row is already correct locally, so waiting on the
+    // round-trip would just make the rename feel slow.
+    setSessions((prev) => prev.map((s) => (s.id === id ? { ...s, title } : s)))
+    try {
+      await updateSession(id, { title })
+    } catch (err) {
+      setError(err.message)
+      refreshHistory()
+    }
+  }
+
+  async function removeSession(id) {
+    try {
+      await deleteSession(id)
+      setSessions((prev) => prev.filter((s) => s.id !== id))
+      if (id === sessionRef.current) newChat()
+    } catch (err) {
+      setError(err.message)
+    }
+  }
+
+  async function clearHistory() {
+    if (!window.confirm('Delete every saved conversation? This cannot be undone.')) return
+    try {
+      await deleteAllSessions()
+      setSessions([])
+      newChat()
+    } catch (err) {
+      setError(err.message)
+    }
   }
 
   async function handleSend(text) {
@@ -108,8 +269,10 @@ export default function App() {
     setBusy(true)
     setError(null)
 
-    // "note" entries are UI-only — the model must never see them.
-    const forModel = history.filter((m) => m.role !== 'note')
+    // "note" entries are UI-only. Empty ones are failed turns replayed from
+    // the database — the API rejects a message with no content, and a turn
+    // that produced nothing is not part of the conversation anyway.
+    const forModel = history.filter((m) => m.role !== 'note' && m.content?.trim())
 
     // Timing for the reasoning panel. Kept as plain closure variables rather
     // than state: they are written from inside stream callbacks, where a state
@@ -120,7 +283,7 @@ export default function App() {
     try {
       if (streaming) {
         setMessages([...history, { role: 'assistant', content: '', thinking: '' }])
-        await streamChat(forModel, config, {
+        await streamChat(forModel, config, sessionRef.current, {
           onTrace: (step) =>
             setMessages((prev) => {
               const next = [...prev]
@@ -164,12 +327,19 @@ export default function App() {
               }
               return next
             }),
-          onMeta: (meta) =>
+          onMeta: (meta) => {
+            // The server opens a conversation for us when we did not have one,
+            // and tells us its id here — before a single token has arrived.
+            if (meta.session_id && meta.session_id !== sessionRef.current) {
+              sessionRef.current = meta.session_id
+              setSessionId(meta.session_id)
+            }
             setMessages((prev) => {
               const next = [...prev]
               next[next.length - 1] = { ...next[next.length - 1], meta: meta.model }
               return next
-            }),
+            })
+          },
           onUsage: (u, metrics) => {
             setUsage(u)
             if (!metrics) return
@@ -180,15 +350,28 @@ export default function App() {
               return next
             })
           },
+          // Arrives after the answer is written to Postgres. Attaching the id
+          // is what lets a like on this bubble be saved.
+          onSaved: ({ message_id }) =>
+            setMessages((prev) => {
+              const next = [...prev]
+              next[next.length - 1] = { ...next[next.length - 1], id: message_id }
+              return next
+            }),
         })
       } else {
-        const data = await sendChat(forModel, config)
+        const data = await sendChat(forModel, config, sessionRef.current)
+        if (data.session_id && data.session_id !== sessionRef.current) {
+          sessionRef.current = data.session_id
+          setSessionId(data.session_id)
+        }
         setUsage({ input_tokens: data.input_tokens, output_tokens: data.output_tokens })
         // No timing here — a non-streamed request only reports the finished
         // reasoning, never when it started.
         setMessages([
           ...history,
           {
+            id: data.message_id,
             role: 'assistant',
             content: data.reply,
             meta: data.model,
@@ -221,6 +404,8 @@ export default function App() {
         ]
       })
       setBusy(false)
+      // Title, counts and totals all changed — pull the fresh rows.
+      refreshHistory()
     }
   }
 
@@ -238,6 +423,22 @@ export default function App() {
       <ConfigPanel
         schema={schema}
         config={config}
+        tab={panelTab}
+        onTab={setPanelTab}
+        history={
+          <SessionList
+            sessions={sessions}
+            activeId={sessionId}
+            loading={historyLoading}
+            error={historyError}
+            onSelect={openSession}
+            onNew={newChat}
+            onRename={renameSession}
+            onDelete={removeSession}
+            onClearAll={clearHistory}
+            onRefresh={refreshHistory}
+          />
+        }
         theme={theme}
         onThemeChange={(next) => {
           setTheme(next)
@@ -297,8 +498,8 @@ export default function App() {
               disabled={!messages.length}
             />
 
-            <button className="ghost" onClick={() => { setMessages([]); setError(null); setUsage(null); setRuns([]) }}>
-              Clear
+            <button className="ghost" onClick={newChat} title="Start a new conversation">
+              New chat
             </button>
           </div>
         </header>
@@ -376,6 +577,28 @@ export default function App() {
       {panelOpen && <div className="scrim" onClick={() => setPanelOpen(false)} />}
     </div>
   )
+}
+
+/**
+ * A row from Postgres, in the shape the live transcript uses.
+ *
+ * The two shapes differ because the live one is built from stream events:
+ * `meta` is the model name, `thinkingMs` is measured in the browser. Mapping
+ * here rather than renaming columns keeps the API honest about what it stores.
+ */
+function fromStored(m) {
+  return {
+    id: m.id,
+    role: m.role,
+    content: m.content,
+    thinking: m.thinking || '',
+    thinkingMs: m.thinking_ms ?? undefined,
+    meta: m.model ?? undefined,
+    search: m.search ?? undefined,
+    trace: m.trace ?? undefined,
+    metrics: m.metrics ?? undefined,
+    liked: m.liked,
+  }
 }
 
 function readSaved() {

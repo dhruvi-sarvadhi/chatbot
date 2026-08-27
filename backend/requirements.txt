@@ -3,6 +3,12 @@ uvicorn[standard]>=0.36
 pydantic>=2.12
 pydantic-settings>=2.11
 
+# Persistence — conversations, messages and per-turn metrics in PostgreSQL.
+# psycopg is the v3 driver; [binary] ships the compiled libpq, so there is
+# nothing to build locally.
+sqlalchemy>=2.0.36
+psycopg[binary]>=3.2
+
 # LLM providers — you only need the one you set as LLM_PROVIDER in .env
 anthropic>=0.69
 openai>=1.109

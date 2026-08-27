@@ -4,9 +4,10 @@ FastAPI validates incoming JSON against these models and documents them
 automatically at http://127.0.0.1:8000/docs.
 """
 
+from datetime import datetime
 from typing import Literal
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, ConfigDict, Field, UUID4
 
 from .catalog import EFFORT_LEVELS
 from .tools import BACKENDS as SEARCH_BACKENDS
@@ -63,12 +64,20 @@ class ChatRequest(BaseModel):
     messages: list[Message] = Field(min_length=1, max_length=200)
     config: ChatConfig = Field(default_factory=ChatConfig)
     context: ClientContext = Field(default_factory=ClientContext)
+    # Which stored conversation this turn belongs to. Omit it and the server
+    # opens a new one and returns the id, so a client that knows nothing about
+    # sessions still gets its history saved.
+    session_id: str | None = Field(default=None, max_length=64)
 
 
 class ChatResponse(BaseModel):
     reply: str
     provider: str
     model: str
+    # Where this turn was stored. None when persistence is off or the
+    # database is unreachable — the answer is still returned either way.
+    session_id: str | None = None
+    message_id: str | None = None
     input_tokens: int | None = None
     output_tokens: int | None = None
     # The model's summarized reasoning, when the model produced any and the
@@ -108,3 +117,140 @@ class ConfigResponse(BaseModel):
     tavily_configured: bool = False
     defaults: ChatConfig
     max_tokens_limit: int = 32000
+
+
+# ── Persistence: sessions, stored messages and stored runs ─────────────────
+
+
+class SessionCreate(BaseModel):
+    """Optional body for POST /api/sessions — everything has a default."""
+
+    title: str | None = Field(default=None, max_length=200)
+    config: ChatConfig | None = None
+    context: ClientContext | None = None
+
+
+class SessionUpdate(BaseModel):
+    """PATCH body. Only the fields present are changed."""
+
+    title: str | None = Field(default=None, min_length=1, max_length=200)
+    archived: bool | None = None
+
+
+class RunOut(BaseModel):
+    """One turn's cost, as stored. Mirrors the live `metrics` SSE payload so
+    a reloaded conversation renders through exactly the same UI code."""
+
+    id: UUID4
+    provider: str = ""
+    model: str = ""
+    effort: str = ""
+    input_tokens: int = 0
+    output_tokens: int = 0
+    reasoning_tokens: int = 0
+    cached_tokens: int = 0
+    model_requests: int = 0
+    tool_calls: int = 0
+    total_ms: int = 0
+    model_ms: int = 0
+    tool_ms: int = 0
+    search_backend: str = ""
+    cost_usd: float | None = None
+    created_at: datetime
+
+    model_config = ConfigDict(from_attributes=True)
+
+
+class MessageOut(BaseModel):
+    """A stored transcript entry."""
+
+    id: UUID4
+    seq: int
+    role: str
+    content: str = ""
+    thinking: str = ""
+    provider: str | None = None
+    model: str | None = None
+    search: str | None = None
+    trace: list | None = None
+    liked: bool = False
+    input_tokens: int | None = None
+    output_tokens: int | None = None
+    latency_ms: int | None = None
+    thinking_ms: int | None = None
+    incomplete: bool = False
+    error: str | None = None
+    created_at: datetime
+    metrics: RunOut | None = None
+
+    model_config = ConfigDict(from_attributes=True)
+
+
+class SessionSummary(BaseModel):
+    """A sidebar row: the conversation plus its totals, no message bodies."""
+
+    id: UUID4
+    title: str
+    provider: str | None = None
+    model: str | None = None
+    archived: bool = False
+    created_at: datetime
+    updated_at: datetime
+    last_message_at: datetime | None = None
+    message_count: int = 0
+    run_count: int = 0
+    input_tokens: int = 0
+    output_tokens: int = 0
+    cost_usd: float | None = None
+
+    model_config = ConfigDict(from_attributes=True)
+
+
+class SessionDetail(SessionSummary):
+    """A conversation with its full transcript, for reopening it."""
+
+    system_prompt: str | None = None
+    effort: str | None = None
+    max_tokens: int | None = None
+    web_search: bool = False
+    search_backend: str | None = None
+    timezone: str | None = None
+    locale: str | None = None
+    messages: list[MessageOut] = []
+    runs: list[RunOut] = []
+
+
+class ModelUsage(BaseModel):
+    model: str
+    provider: str
+    runs: int
+    input_tokens: int
+    output_tokens: int
+    cost_usd: float | None = None
+    avg_ms: int = 0
+
+    model_config = ConfigDict(protected_namespaces=())
+
+
+class StatsResponse(BaseModel):
+    """Everything-so-far analytics across every stored conversation."""
+
+    sessions: int = 0
+    messages: int = 0
+    runs: int = 0
+    input_tokens: int = 0
+    output_tokens: int = 0
+    reasoning_tokens: int = 0
+    cached_tokens: int = 0
+    tool_calls: int = 0
+    cost_usd: float | None = None
+    avg_ms: int = 0
+    by_model: list[ModelUsage] = []
+
+
+class LikeUpdate(BaseModel):
+    liked: bool
+
+
+class DeletedResponse(BaseModel):
+    deleted: int

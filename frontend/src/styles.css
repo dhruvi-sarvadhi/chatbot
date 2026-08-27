@@ -1356,3 +1356,160 @@ body {
 .panel__body > * {
   flex-shrink: 0;
 }
+
+/* ── Panel tabs (Chats / Settings) ───────────────────────── */
+.panel__tabs { display: flex; gap: 2px; }
+
+.panel__tab {
+  border: 0;
+  background: transparent;
+  padding: 5px 10px;
+  border-radius: 8px;
+  font: inherit;
+  font-size: 12.5px;
+  font-weight: 600;
+  letter-spacing: .04em;
+  text-transform: uppercase;
+  color: var(--muted);
+  cursor: pointer;
+  transition: color .12s, background .12s;
+}
+.panel__tab:hover { color: var(--text); }
+.panel__tab.is-active { color: var(--accent); background: var(--accent-soft); }
+
+/* The list scrolls as one column, so it drops the panel body's 20px gap. */
+.panel__body--history { gap: 10px; padding-bottom: 14px; }
+
+/* ── Chat history ────────────────────────────────────────── */
+.history { display: flex; flex-direction: column; gap: 10px; min-height: 0; }
+
+.history__actions { display: flex; gap: 6px; }
+
+.history__new {
+  flex: 1;
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  padding: 9px 12px;
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  background: var(--panel);
+  color: var(--text);
+  font: inherit;
+  font-size: 13px;
+  font-weight: 600;
+  text-align: left;
+  cursor: pointer;
+  transition: border-color .12s, background .12s;
+}
+.history__new:hover { border-color: var(--accent); background: var(--accent-soft); }
+
+/* Grid rather than inline-block: an SVG on a text baseline sits a couple of
+   pixels low, which is visible when the button is this small. */
+.history__refresh { display: grid; place-items: center; padding: 0 10px; }
+
+.history__empty {
+  margin: 4px 0;
+  font-size: 12.5px;
+  line-height: 1.5;
+  color: var(--muted);
+}
+.history__empty--warn { color: var(--danger); }
+
+.history__list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.history__item {
+  display: flex;
+  align-items: center;
+  gap: 2px;
+  border-radius: 10px;
+  transition: background .12s;
+}
+.history__item:hover { background: var(--bot-bubble); }
+.history__item.is-active { background: var(--accent-soft); }
+
+.history__open {
+  flex: 1;
+  min-width: 0;          /* lets the title ellipsis instead of stretching the row */
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  padding: 8px 10px;
+  border: 0;
+  background: transparent;
+  font: inherit;
+  text-align: left;
+  color: var(--text);
+  cursor: pointer;
+}
+
+.history__title {
+  font-size: 13px;
+  font-weight: 500;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.history__item.is-active .history__title { color: var(--accent); }
+
+.history__meta {
+  font-size: 11px;
+  color: var(--muted);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+/* Row controls stay out of the way until the row is hovered or current —
+   three icons on every row would drown out the titles. */
+.history__row-actions {
+  display: flex;
+  gap: 1px;
+  padding-right: 5px;
+  opacity: 0;
+  transition: opacity .12s;
+}
+.history__item:hover .history__row-actions,
+.history__item.is-active .history__row-actions,
+.history__row-actions:focus-within { opacity: 1; }
+
+.history__icon {
+  display: grid;
+  place-items: center;
+  padding: 5px;
+  border-color: transparent;
+  color: var(--muted);
+}
+.history__icon:hover { color: var(--text); }
+.history__icon.is-danger,
+.history__icon.is-danger:hover { color: var(--danger); border-color: var(--danger); }
+
+.history__rename {
+  flex: 1;
+  min-width: 0;
+  margin: 4px 6px;
+  padding: 6px 8px;
+  border: 1px solid var(--accent);
+  border-radius: 8px;
+  background: var(--panel);
+  color: var(--text);
+  font: inherit;
+  font-size: 13px;
+}
+.history__rename:focus { outline: none; }
+
+.history__clear {
+  margin-top: 4px;
+  width: 100%;
+  padding: 7px;
+  font-size: 12px;
+  color: var(--muted);
+}
+.history__clear:hover { color: var(--danger); border-color: var(--danger); }

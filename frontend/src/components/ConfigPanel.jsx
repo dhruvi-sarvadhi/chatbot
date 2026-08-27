@@ -21,10 +21,64 @@ const BACKEND_HINT = {
 
 const TOKEN_STEPS = [256, 512, 1024, 2048, 4096, 8192, 16000]
 
-export default function ConfigPanel({ schema, config, onChange, onReset, usage, runs = [], open, onClose, theme, onThemeChange }) {
+export default function ConfigPanel({
+  schema,
+  config,
+  onChange,
+  onReset,
+  usage,
+  runs = [],
+  open,
+  onClose,
+  theme,
+  onThemeChange,
+  // The chat history lives in the same drawer, behind its own tab — one
+  // sidebar rather than two competing for the same 300px.
+  history,
+  tab = 'settings',
+  onTab,
+}) {
+  const head = (
+    <div className="panel__head">
+      <div className="panel__tabs" role="tablist">
+        <button
+          role="tab"
+          aria-selected={tab === 'chats'}
+          className={`panel__tab ${tab === 'chats' ? 'is-active' : ''}`}
+          onClick={() => onTab?.('chats')}
+        >
+          Chats
+        </button>
+        <button
+          role="tab"
+          aria-selected={tab === 'settings'}
+          className={`panel__tab ${tab === 'settings' ? 'is-active' : ''}`}
+          onClick={() => onTab?.('settings')}
+        >
+          Settings
+        </button>
+      </div>
+      <button className="ghost panel__close" onClick={onClose} aria-label="Close settings">
+        ✕
+      </button>
+    </div>
+  )
+
+  // History does not depend on the provider catalogue, so it stays usable
+  // even when /api/config has not answered (or the API key is missing).
+  if (tab === 'chats') {
+    return (
+      <aside className={`panel ${open ? 'panel--open' : ''}`}>
+        {head}
+        <div className="panel__body panel__body--history">{history}</div>
+      </aside>
+    )
+  }
+
   if (!schema) {
     return (
       <aside className={`panel ${open ? 'panel--open' : ''}`}>
+        {head}
         <p className="panel__loading">Loading configuration…</p>
       </aside>
     )
@@ -48,12 +102,7 @@ export default function ConfigPanel({ schema, config, onChange, onReset, usage, 
 
   return (
     <aside className={`panel ${open ? 'panel--open' : ''}`}>
-      <div className="panel__head">
-        <h2>Configuration</h2>
-        <button className="ghost panel__close" onClick={onClose} aria-label="Close settings">
-          ✕
-        </button>
-      </div>
+      {head}
 
       <div className="panel__body">
         {/* ── Which API ───────────────────────────────────────── */}

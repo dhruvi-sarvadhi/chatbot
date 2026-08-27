@@ -8,7 +8,12 @@ from a browser to a Python backend to Claude / OpenAI and back.
 │ React (5173) │  { messages, config } ──►│ FastAPI      │──HTTPS──► Claude
 │              │                          │   (8000)     │           or OpenAI
 │ config panel │◄── reply / SSE chunks ───│  holds key   │◄──────────┘
-└──────────────┘                          └──────────────┘
+│ chat history │                          └──────┬───────┘
+└──────────────┘                                 │ conversations,
+                                                 ▼ messages, per-turn cost
+                                          ┌──────────────┐
+                                          │  PostgreSQL  │
+                                          └──────────────┘
 ```
 
 Every request carries the config panel's current settings, so changing the
@@ -35,6 +40,55 @@ Or just run `./backend/run.sh`, which does all of the above.
 
 API is now at http://127.0.0.1:8000 — open http://127.0.0.1:8000/docs to try the
 endpoints without the UI.
+
+### The database
+
+Conversations are stored in **PostgreSQL**, so history survives a reload, a
+different browser and a server restart. You need a running Postgres; the app
+does the rest — it creates the database and its tables on first start.
+
+```bash
+# macOS
+brew install postgresql@18 && brew services start postgresql@18
+```
+
+Then point `DATABASE_URL` in `backend/.env` at it:
+
+```bash
+DATABASE_URL=postgresql+psycopg://YOUR_USER@localhost:5432/chatbot
+```
+
+Check it worked:
+
+```bash
+curl http://127.0.0.1:8000/api/health
+# {"status":"ok","database":"connected","database_name":"chatbot", ...}
+```
+
+Saving is never allowed to break answering. If Postgres is down the chat still
+works — it just stops remembering, the **Chats** tab says why, and the log
+carries a warning at startup. `PERSISTENCE_ENABLED=false` turns storage off
+deliberately.
+
+#### What gets stored
+
+Three tables, because the interesting queries are different shapes:
+
+| Table | One row is | Why separate |
+|-------|-----------|--------------|
+| `sessions` | a conversation | what the sidebar lists — queried without touching message text |
+| `messages` | one turn, in `seq` order | the transcript, plus reasoning, the agent trace (JSONB) and the web-search badge |
+| `runs` | what one answer cost | tokens, the model-vs-tool timing split, tool calls and dollars — aggregates that should not have to scan message bodies |
+
+Turns that fail are recorded too, flagged `incomplete` with the error, so the
+transcript you debug from is not missing the turn that broke.
+
+Have a look with `psql`:
+
+```bash
+psql -d chatbot -c "SELECT title, last_message_at FROM sessions ORDER BY 2 DESC"
+psql -d chatbot -c "SELECT model, sum(input_tokens), sum(output_tokens), sum(cost_usd) FROM runs GROUP BY 1"
+```
 
 ### Choosing the provider
 
@@ -68,11 +122,25 @@ behave like one origin during development.
 
 ## API endpoints
 
-| Method | Path               | What it does                                                |
-|--------|--------------------|-------------------------------------------------------------|
-| GET    | `/api/config`      | Providers, models, effort levels + the `.env` defaults       |
-| POST   | `/api/chat`        | Send conversation → get the full reply as JSON               |
-| POST   | `/api/chat/stream` | Same, but streams the reply word-by-word (SSE)               |
+| Method | Path                       | What it does                                           |
+|--------|----------------------------|--------------------------------------------------------|
+| GET    | `/api/config`              | Providers, models, effort levels + the `.env` defaults  |
+| POST   | `/api/chat`                | Send conversation → get the full reply as JSON          |
+| POST   | `/api/chat/stream`         | Same, but streams the reply word-by-word (SSE)          |
+| GET    | `/api/sessions`            | The sidebar: every conversation with its counts and totals |
+| POST   | `/api/sessions`            | Open an empty conversation                              |
+| GET    | `/api/sessions/{id}`       | One conversation with its full transcript and metrics   |
+| PATCH  | `/api/sessions/{id}`       | Rename or archive                                       |
+| DELETE | `/api/sessions/{id}`       | Delete it, and its messages and runs                    |
+| DELETE | `/api/sessions`            | Clear the whole history                                 |
+| GET    | `/api/sessions/{id}/runs`  | Every turn's cost for one conversation                  |
+| PATCH  | `/api/messages/{id}/like`  | Persist a thumbs-up                                     |
+| GET    | `/api/stats`               | Totals across everything, broken down by model          |
+| GET    | `/api/health`              | Is the API up, and is it currently remembering anything |
+
+Both chat endpoints take an optional `session_id`. Leave it out and the server
+opens a conversation for you and returns the id — in the JSON reply, or in the
+stream's first `meta` event — so nothing has to be created up front.
 
 `/api/config` also asks each provider which models your key can actually reach,
 so the panel greys out anything unavailable (cached after the first call).
@@ -97,14 +165,19 @@ leave out falls back to `backend/.env`:
 }
 ```
 
-The streaming endpoint emits three kinds of SSE event:
+The streaming endpoint emits one `data:` line per event:
 
 ```
-data: {"meta": {"provider": "openai", "model": "gpt-4o"}}
+data: {"meta": {"provider": "openai", "model": "gpt-4o", "session_id": "f48a4cdc-…"}}
 data: {"delta": "Arr"}
 data: {"usage": {"input_tokens": 68, "output_tokens": 18}}
+data: {"saved": {"message_id": "b8ec82bb-…"}}
 data: [DONE]
 ```
+
+`meta` arrives before the first token, so the browser knows which conversation
+the turn was filed under straight away. `saved` arrives last, once the answer
+is actually in Postgres.
 
 Try it from the terminal:
 
@@ -122,6 +195,10 @@ curl -X POST http://127.0.0.1:8000/api/chat \
 |------|----------------|
 | [backend/app/config.py](backend/app/config.py) | Reads `.env` into a typed settings object |
 | [backend/app/catalog.py](backend/app/catalog.py) | The model / effort options the panel offers |
+| [backend/app/models.py](backend/app/models.py) | The three tables, and why the schema is shaped that way |
+| [backend/app/store.py](backend/app/store.py) | Every database read and write, in one place |
+| [backend/app/db.py](backend/app/db.py) | Engine, pooling, and creating the database on first run |
+| [frontend/src/components/SessionList.jsx](frontend/src/components/SessionList.jsx) | The chat history sidebar |
 | [frontend/src/components/ConfigPanel.jsx](frontend/src/components/ConfigPanel.jsx) | The left-hand settings panel |
 | [frontend/src/components/Markdown.jsx](frontend/src/components/Markdown.jsx) | Turns a model reply into formatted output |
 | [frontend/src/lib/highlight.js](frontend/src/lib/highlight.js) | Syntax highlighting, trimmed to 10 languages |
