@@ -7,7 +7,7 @@ automatically at http://127.0.0.1:8000/docs.
 from datetime import datetime
 from typing import Literal
 
-from pydantic import BaseModel, ConfigDict, Field, UUID4
+from pydantic import UUID4, BaseModel, ConfigDict, Field, model_validator
 
 from .catalog import EFFORT_LEVELS
 from .tools import BACKENDS as SEARCH_BACKENDS
@@ -17,9 +17,39 @@ Effort = Literal["low", "medium", "high", "xhigh", "max"]
 SearchBackend = Literal["auto", "tavily", "duckduckgo", "compare"]
 
 
+# base64 inflates a file by about a third, so this is roughly a 4 MB upload.
+MAX_ATTACHMENT_CHARS = 6_000_000
+
+
+class Attachment(BaseModel):
+    """A file the user attached to one message.
+
+    Three kinds, because they reach the model three different ways:
+      image     — sent as an image block; the model looks at it
+      document  — sent as a PDF; the provider extracts the pages
+      text      — already decoded in the browser and pasted in as text,
+                  which is cheaper and works everywhere
+    """
+
+    kind: Literal["image", "document", "text"]
+    name: str = Field(max_length=200)
+    media_type: str = Field(max_length=100)
+    # base64 for image/document; the plain contents for text.
+    data: str = Field(max_length=MAX_ATTACHMENT_CHARS)
+
+
 class Message(BaseModel):
     role: Literal["user", "assistant"]
-    content: str = Field(min_length=1, max_length=100_000)
+    # May be empty when the message is only an attachment — "what is this?"
+    # is often carried entirely by the picture.
+    content: str = Field(default="", max_length=100_000)
+    attachments: list[Attachment] = Field(default_factory=list, max_length=5)
+
+    @model_validator(mode="after")
+    def _not_empty(self):
+        if not self.content.strip() and not self.attachments:
+            raise ValueError("a message needs text, an attachment, or both")
+        return self
 
 
 class ChatConfig(BaseModel):

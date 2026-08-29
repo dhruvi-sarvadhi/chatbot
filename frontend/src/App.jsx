@@ -257,14 +257,14 @@ export default function App() {
     }
   }
 
-  async function handleSend(text) {
+  async function handleSend(text, attachments = []) {
     // If settings changed since the last reply, mark it in the transcript so
     // it is obvious which answer used which configuration.
     const changes = messages.length ? describeChanges(prevConfig.current, config) : null
     const marker = changes ? [{ role: 'note', content: changes }] : []
     prevConfig.current = config
 
-    const history = [...messages, ...marker, { role: 'user', content: text }]
+    const history = [...messages, ...marker, { role: 'user', content: text, attachments }]
     setMessages(history)
     setBusy(true)
     setError(null)
@@ -531,6 +531,7 @@ export default function App() {
               thinking={m.thinking}
               thinkingActive={m.thinkingActive}
               thinkingMs={m.thinkingMs}
+              attachments={m.attachments}
               search={m.search}
               trace={m.trace}
               metrics={m.metrics}

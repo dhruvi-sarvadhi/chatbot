@@ -53,7 +53,7 @@ class OpenAIProvider(ChatProvider):
             # argument — not as a message with role "system", the way Chat
             # Completions did.
             "instructions": cfg.system,
-            "input": messages,
+            "input": _to_input(messages),
             "max_output_tokens": cfg.max_tokens,
         }
 
@@ -329,3 +329,46 @@ def _result_detail(outcome, result: str) -> str:
     rows.append("")
     rows.append(result[:TRACE_PREVIEW])
     return "\n".join(rows)
+
+
+def _to_input(messages: list[dict]) -> list[dict]:
+    """Turn our messages into Responses API input items.
+
+    A message with no attachments stays a plain string, which keeps the common
+    case simple. One with attachments becomes a list of typed content blocks —
+    the text first, then the files, because the question is what tells the
+    model what to look for.
+    """
+    items = []
+    for m in messages:
+        attachments = m.get("attachments") or []
+        if not attachments:
+            items.append({"role": m["role"], "content": m.get("content", "")})
+            continue
+
+        content: list[dict] = []
+        if m.get("content"):
+            content.append({"type": "input_text", "text": m["content"]})
+
+        for a in attachments:
+            if a["kind"] == "image":
+                content.append({
+                    "type": "input_image",
+                    "image_url": f"data:{a['media_type']};base64,{a['data']}",
+                })
+            elif a["kind"] == "document":
+                content.append({
+                    "type": "input_file",
+                    "filename": a["name"],
+                    "file_data": f"data:{a['media_type']};base64,{a['data']}",
+                })
+            else:
+                # Already plain text — no upload, no extraction, no per-page
+                # cost. Fenced so the model can tell file from question.
+                content.append({
+                    "type": "input_text",
+                    "text": f"--- file: {a['name']} ---\n{a['data']}\n--- end of {a['name']} ---",
+                })
+
+        items.append({"role": m["role"], "content": content})
+    return items

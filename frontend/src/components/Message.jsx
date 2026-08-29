@@ -23,6 +23,7 @@ export default function Message({
   search,
   trace,
   metrics,
+  attachments,
   thinking,
   thinkingActive,
   thinkingMs,
@@ -49,6 +50,19 @@ export default function Message({
         {isUser ? 'You' : <BotLogo />}
       </div>
       <div className="msg__wrap">
+        {attachments?.length > 0 && (
+          <ul className="sent">
+            {attachments.map((a, i) => (
+              <li key={i} className="sent__item">
+                <span className="sent__kind">
+                  {a.kind === 'image' ? 'IMG' : a.kind === 'document' ? 'PDF' : 'TXT'}
+                </span>
+                <span className="sent__name">{a.name}</span>
+              </li>
+            ))}
+          </ul>
+        )}
+
         {/* Reasoning sits above the answer because that is the order it
             happened in — the model thought, then it wrote. */}
         {!isUser && search && (

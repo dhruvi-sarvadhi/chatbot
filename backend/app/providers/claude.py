@@ -41,7 +41,7 @@ class ClaudeProvider(ChatProvider):
             # `system` is a top-level parameter in Claude's API — it is NOT a
             # message with role "system" like in OpenAI's API.
             "system": cfg.system,
-            "messages": messages,
+            "messages": _to_blocks(messages),
             "betas": [FALLBACK_BETA],
             "fallbacks": FALLBACK_MODE,
         }
@@ -165,3 +165,41 @@ def _without_beta(params: dict) -> dict:
     plain.pop("betas", None)
     plain.pop("fallbacks", None)
     return plain
+
+
+def _to_blocks(messages: list[dict]) -> list[dict]:
+    """Turn our messages into Claude content blocks.
+
+    Same idea as the OpenAI converter, different vocabulary: Claude calls them
+    `image` and `document` blocks, and takes the base64 in a `source` object
+    rather than a data URI.
+    """
+    out = []
+    for m in messages:
+        attachments = m.get("attachments") or []
+        if not attachments:
+            out.append({"role": m["role"], "content": m.get("content", "")})
+            continue
+
+        blocks: list[dict] = []
+        if m.get("content"):
+            blocks.append({"type": "text", "text": m["content"]})
+
+        for a in attachments:
+            if a["kind"] in ("image", "document"):
+                blocks.append({
+                    "type": "image" if a["kind"] == "image" else "document",
+                    "source": {
+                        "type": "base64",
+                        "media_type": a["media_type"],
+                        "data": a["data"],
+                    },
+                })
+            else:
+                blocks.append({
+                    "type": "text",
+                    "text": f"--- file: {a['name']} ---\n{a['data']}\n--- end of {a['name']} ---",
+                })
+
+        out.append({"role": m["role"], "content": blocks})
+    return out
