@@ -23,6 +23,17 @@ class GenerationConfig:
     web_search: bool = False
     # Which search backend to use: auto / tavily / duckduckgo / compare.
     search_backend: str = "auto"
+    # Let the model reach the user's Clarix workspace. A provider still needs
+    # a configured key on top of this — the flag can only take the tools away,
+    # never conjure them.
+    clarix: bool = True
+    # This turn is a form coming back, so the answers are already resolved and
+    # the only thing left to do is write them through. Nothing about that needs
+    # the web, and gpt-4o-mini reliably searched it anyway — burning the whole
+    # tool budget on "Week-september-task-list" instead of creating the task.
+    # So the search tool is not offered on these turns at all: the surest way
+    # to stop a model picking the wrong tool is not to hand it one.
+    from_form: bool = False
 
 
 @dataclass
@@ -85,6 +96,10 @@ class StreamChunk:
     # One entry for the agent trace — a debugging view of the loop, not part
     # of the answer. Keys: step, label, detail, ms. See the providers.
     trace: dict | None = None
+    # A form for the user to fill in, rendered as a card in the transcript
+    # instead of the model asking for each field in prose. Built by
+    # tools/ask_form.py; the answers come back as the user's next message.
+    form: dict | None = None
     # Set only on the final `done` chunk.
     metrics: TurnMetrics | None = None
     done: bool = False

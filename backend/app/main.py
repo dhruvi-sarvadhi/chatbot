@@ -148,6 +148,8 @@ def _resolve(cfg: ChatConfig, ctx: ClientContext) -> tuple[str, GenerationConfig
         effort=cfg.effort or settings.effort,
         web_search=cfg.web_search,
         search_backend=cfg.search_backend,
+        clarix=cfg.clarix,
+        from_form=cfg.from_form,
     )
 
 
@@ -184,6 +186,7 @@ def config() -> ConfigResponse:
     return ConfigResponse(
         providers=providers,
         tavily_configured=bool(settings.tavily_api_key),
+        clarix_configured=bool(settings.clarix_api_key),
         defaults=ChatConfig(
             provider=settings.llm_provider,
             model=settings.active_model,
@@ -235,6 +238,7 @@ def _persist_start(request: ChatRequest, provider_name: str, gen: GenerationConf
             )
             # Not via update_session: it skips None, and False is a real value.
             session.web_search = bool(cfg.web_search)
+            session.clarix = bool(cfg.clarix)
 
             store.sync_history(db, session, [m.model_dump() for m in request.messages])
             return session.id
@@ -337,9 +341,10 @@ def chat_stream(request: ChatRequest) -> StreamingResponse:
     The format is SSE (Server-Sent Events): one `data: {...}` line per event.
     First event carries the resolved provider/model and the session id, the
     last carries usage. In between: `trace` events (one per step of the agent
-    loop), `status` events (web search activity), `thinking` events (the model
-    reasoning) and `delta` events (the answer). Separate keys so the UI can
-    render each in its own place.
+    loop), `status` events (web search activity), a `form` event (a card of
+    inputs for the user to fill in, instead of the model asking field by
+    field), `thinking` events (the model reasoning) and `delta` events (the
+    answer). Separate keys so the UI can render each in its own place.
 
     The whole answer is accumulated as it streams and written to Postgres once
     the stream ends — including when it ends badly, in which case the row is
@@ -368,6 +373,7 @@ def chat_stream(request: ChatRequest) -> StreamingResponse:
         thinking: list[str] = []
         trace: list[dict] = []
         search = None
+        form = None
         metrics = None
         usage = {}
         error = None
@@ -388,6 +394,12 @@ def chat_stream(request: ChatRequest) -> StreamingResponse:
                 elif chunk.status:
                     search = chunk.status
                     yield _sse({"status": chunk.status})
+                elif chunk.form:
+                    # Only ever one per turn in practice — the tool exists to
+                    # stop the model asking, and asking twice in one breath is
+                    # the same mistake. Last one wins if it ever happens.
+                    form = chunk.form
+                    yield _sse({"form": chunk.form})
                 elif chunk.thinking:
                     thinking.append(chunk.thinking)
                     yield _sse({"thinking": chunk.thinking})
@@ -407,6 +419,7 @@ def chat_stream(request: ChatRequest) -> StreamingResponse:
             model=gen.model,
             search=search,
             trace=trace or None,
+            form=form,
             metrics=metrics,
             input_tokens=usage.get("input_tokens"),
             output_tokens=usage.get("output_tokens"),
@@ -454,6 +467,11 @@ def _friendly(exc: Exception, provider: str) -> str:
         return "Rate limited by the provider. Wait a moment and try again."
     if "model" in low and ("not found" in low or "does not exist" in low):
         return "That model is not available on your account — pick another one."
+    if "verify model access" in low:
+        # Upstream flakiness, not a config problem — the provider already got
+        # several attempts before this reached the user, so say what happened
+        # rather than sending them to check their key.
+        return "The provider could not verify model access. It retried and still failed — try again in a moment."
     return text[:400]
 
 
@@ -515,6 +533,7 @@ def _detail(session, totals: dict) -> SessionDetail:
         max_tokens=session.max_tokens,
         web_search=session.web_search,
         search_backend=session.search_backend,
+        clarix=session.clarix,
         timezone=session.timezone,
         locale=session.locale,
         messages=[
@@ -523,7 +542,7 @@ def _detail(session, totals: dict) -> SessionDetail:
                     k: getattr(m, k)
                     for k in (
                         "id", "seq", "role", "content", "thinking", "provider",
-                        "model", "search", "trace", "liked", "input_tokens",
+                        "model", "search", "trace", "form", "liked", "input_tokens",
                         "output_tokens", "latency_ms", "thinking_ms",
                         "incomplete", "error", "created_at",
                     )
@@ -575,6 +594,7 @@ def create_session(
         max_tokens=cfg.max_tokens,
         web_search=bool(cfg.web_search),
         search_backend=cfg.search_backend,
+        clarix=bool(cfg.clarix),
         timezone=ctx.timezone if ctx else None,
         locale=ctx.locale if ctx else None,
     )

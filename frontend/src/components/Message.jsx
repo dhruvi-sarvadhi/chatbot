@@ -3,6 +3,7 @@ import Markdown from './Markdown.jsx'
 import MessageActions from './MessageActions.jsx'
 import BotLogo from './BotLogo.jsx'
 import Reasoning from './Reasoning.jsx'
+import ToolForm from './ToolForm.jsx'
 
 // One chat bubble. `role` is "user", "assistant", or "note" (a local-only
 // line marking a configuration change — it is never sent to the model).
@@ -23,6 +24,10 @@ export default function Message({
   search,
   trace,
   metrics,
+  form,
+  formState,
+  onFormSubmit,
+  onFormCancel,
   attachments,
   thinking,
   thinkingActive,
@@ -42,7 +47,8 @@ export default function Message({
   // until the first thinking / search / answer event it has nothing to show.
   // Rendering it anyway would put a second avatar above the typing dots,
   // which are already the indicator for exactly this moment.
-  if (!isUser && pending && !content && !thinking && !search && !trace?.length) return null
+  if (!isUser && pending && !content && !thinking && !search && !trace?.length && !form)
+    return null
 
   return (
     <div className={`msg ${isUser ? 'msg--user' : 'msg--bot'}`}>
@@ -86,6 +92,17 @@ export default function Message({
             {isUser ? <Clamped text={content} /> : <Markdown>{content}</Markdown>}
             {pending && !thinkingActive && search !== 'searching' && <span className="caret" />}
           </div>
+        )}
+
+        {/* Under the reply, not above it: the model's line is "fill this in",
+            and the thing being pointed at should follow the pointing. */}
+        {!isUser && form && (
+          <ToolForm
+            spec={form}
+            state={formState}
+            onSubmit={onFormSubmit}
+            onCancel={onFormCancel}
+          />
         )}
 
         {/* Actions appear once there is something to act on — an answer

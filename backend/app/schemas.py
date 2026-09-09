@@ -65,6 +65,15 @@ class ChatConfig(BaseModel):
     web_search: bool = False
     # Which search backend runs. "compare" runs both and times them.
     search_backend: SearchBackend = "auto"
+    # Let the model read and write the user's Clarix workspace with the
+    # server's API key. Defaults ON, unlike web_search, because it is already
+    # gated on a key existing at all: the switch is there to hold the tools
+    # back on a turn where a live write would be unwelcome, not to opt in.
+    clarix: bool = True
+    # Set by the UI when this message is a FORM being submitted, not something
+    # the user typed. It is a fact about the turn, not a setting — the panel
+    # has no switch for it. See GenerationConfig.from_form for what it buys.
+    from_form: bool = False
     system_prompt: str | None = Field(default=None, max_length=8000)
     max_tokens: int | None = Field(default=None, ge=64, le=32000)
     effort: Effort | None = None
@@ -145,6 +154,10 @@ class ConfigResponse(BaseModel):
     search_backends: list[str] = SEARCH_BACKENDS
     # False when no TAVILY_API_KEY is set, so the panel can say why.
     tavily_configured: bool = False
+    # False when no CLARIX_API_KEY is set. The key itself is never sent to the
+    # browser — only whether there is one, which is all the panel needs to
+    # decide between "off" and "cannot be turned on".
+    clarix_configured: bool = False
     defaults: ChatConfig
     max_tokens_limit: int = 32000
 
@@ -203,6 +216,7 @@ class MessageOut(BaseModel):
     model: str | None = None
     search: str | None = None
     trace: list | None = None
+    form: dict | None = None
     liked: bool = False
     input_tokens: int | None = None
     output_tokens: int | None = None
@@ -244,6 +258,7 @@ class SessionDetail(SessionSummary):
     max_tokens: int | None = None
     web_search: bool = False
     search_backend: str | None = None
+    clarix: bool = True
     timezone: str | None = None
     locale: str | None = None
     messages: list[MessageOut] = []

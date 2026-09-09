@@ -91,6 +91,11 @@ export default function ConfigPanel({
   const model = provider.models.find((m) => m.id === config.model)
   const canEffort = model ? model.supports_effort : provider.supports_effort
   const canSearch = model ? model.supports_search : true
+  // Clarix runs in this process's own tool loop, which only the OpenAI
+  // provider has — Claude here declares Anthropic's hosted search and nothing
+  // else. The switch stays usable so the setting survives a provider swap,
+  // but the panel says plainly that it is doing nothing right now.
+  const isOpenAI = config.provider === 'openai'
   const set = (patch) => onChange({ ...config, ...patch })
 
   function switchProvider(next) {
@@ -217,6 +222,43 @@ export default function ConfigPanel({
           )}
         </section>
 
+        {/* ── Clarix workspace ────────────────────────────────── */}
+        <section className={`field ${schema.clarix_configured ? '' : 'field--off'}`}>
+          <label className="field__label">
+            Clarix workspace
+            {!schema.clarix_configured && <span className="field__tag">no key</span>}
+          </label>
+          <label className="toggle toggle--block">
+            <input
+              type="checkbox"
+              checked={Boolean(config.clarix) && schema.clarix_configured}
+              disabled={!schema.clarix_configured}
+              onChange={(e) => set({ clarix: e.target.checked })}
+            />
+            Let the model read and write projects and tasks
+          </label>
+          <p className="field__hint">
+            {schema.clarix_configured ? (
+              <>
+                The model acts as the server's <code>CLARIX_API_KEY</code> in your real
+                workspace — creating and updating tasks, not just reading. Turn
+                it off to hold it back.
+              </>
+            ) : (
+              <>
+                Set <code>CLARIX_API_KEY</code> in <code>backend/.env</code> and restart
+                the server. Keys are never entered in the browser.
+              </>
+            )}
+          </p>
+          {config.clarix && schema.clarix_configured && !isOpenAI && (
+            <p className="field__hint field__hint--warn">
+              Only OpenAI runs these tools — on {provider.label} they are not offered,
+              whatever this says.
+            </p>
+          )}
+        </section>
+
         {/* ── Max tokens ──────────────────────────────────────── */}
         <section className="field">
           <label className="field__label" htmlFor="tokens">
@@ -284,6 +326,18 @@ export default function ConfigPanel({
               {config.web_search && canSearch
                 ? `web search · ${BACKEND_LABEL[config.search_backend ?? 'auto']}`
                 : 'off'}
+            </strong>
+          </div>
+          <div className="readout__row">
+            <span>Clarix</span>
+            <strong>
+              {!schema.clarix_configured
+                ? 'no key'
+                : !config.clarix
+                  ? 'off'
+                  : isOpenAI
+                    ? 'projects + tasks'
+                    : 'off (needs OpenAI)'}
             </strong>
           </div>
           {usage && (

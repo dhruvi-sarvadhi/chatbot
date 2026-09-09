@@ -5,13 +5,19 @@ back results — everything here executes in this process. That is the whole
 difference: we own the loop, the cost, and the failure modes.
 """
 
+from .ask_form import FORM_TOOL_SCHEMA, build_form
+from .clarix_projects import CLARIX_TOOL_SCHEMA, run_clarix
 from .web_search import BACKENDS, SEARCH_TOOL_SCHEMA, SearchOutcome, SearchRun, run_search, web_search
 
 __all__ = [
     "BACKENDS",
+    "CLARIX_TOOL_SCHEMA",
+    "FORM_TOOL_SCHEMA",
     "SEARCH_TOOL_SCHEMA",
+    "build_form",
     "SearchOutcome",
     "SearchRun",
+    "run_clarix",
     "run_search",
     "web_search",
 ]

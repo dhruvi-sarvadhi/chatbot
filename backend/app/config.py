@@ -33,6 +33,25 @@ class Settings(BaseSettings):
     # empty and search falls back to DuckDuckGo, which needs no key.
     tavily_api_key: str = ""
 
+    # ── Clarix Projects API ─────────────────────────────────────────────
+    # Lets the model read and write real projects and tasks. Leave the key
+    # empty and the tool is simply not offered to the model — nothing breaks.
+    #
+    # The URL is the GATEWAY, which is the only public entry point. Note there
+    # is no `/projects-api` prefix: the app answers on bare paths (`/projects`,
+    # `/tasks`). See clarix_client.py for why that matters.
+    clarix_api_url: str = "http://localhost:5100"
+    # A long-lived key (`clx_live_<workspace>_…`) issued from
+    # Clarix → Settings → API access. It acts as the person who created it, so
+    # it can do exactly what they can do and no more.
+    clarix_api_key: str = ""
+    # Clarix encrypts every response body when ENABLE_PAYLOAD_ENCRYPTION=true
+    # (its local and production default), so a client needs this as a SECOND
+    # shared secret just to read replies. Copy ENCRYPTION_KEY verbatim from the
+    # Clarix backend's .env.local — only the first 32 chars are used, but paste
+    # the whole thing so it stays comparable with the server's value.
+    clarix_encryption_key: str = ""
+
     # Generation
     system_prompt: str = "You are a friendly, concise assistant."
     max_tokens: int = 2048

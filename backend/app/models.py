@@ -60,6 +60,8 @@ class ChatSession(Base):
     max_tokens: Mapped[int | None] = mapped_column(Integer)
     web_search: Mapped[bool] = mapped_column(Boolean, default=False)
     search_backend: Mapped[str | None] = mapped_column(String(24))
+    # Whether the Clarix tools were offered on this conversation.
+    clarix: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False)
 
     # What the browser reported at the time — useful when reading back a
     # transcript that says "tomorrow".
@@ -129,6 +131,10 @@ class ChatMessage(Base):
     # The agent loop, one entry per step. JSONB so it can be queried, not just
     # read back: e.g. which turns actually called a tool.
     trace: Mapped[list | None] = mapped_column(JSONB)
+    # The form this answer put on screen, if it asked for details with inputs
+    # rather than in prose. Stored so reopening the conversation shows the
+    # card that was actually filled in, not a reply referring to a missing one.
+    form: Mapped[dict | None] = mapped_column(JSONB)
 
     liked: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
 

@@ -14,3 +14,4 @@ frontend/dist/
 # Editors / OS
 .DS_Store
 .vscode/
+backend/.env.bak.1787991353

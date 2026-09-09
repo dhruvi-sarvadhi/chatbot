@@ -6,6 +6,7 @@ import RunDetails from './components/RunDetails.jsx'
 import Message from './components/Message.jsx'
 import TypingDots from './components/TypingDots.jsx'
 import SessionList from './components/SessionList.jsx'
+import Resizer, { useStoredFlag, useStoredWidth } from './components/Resizer.jsx'
 import {
   deleteAllSessions,
   deleteSession,
@@ -26,6 +27,12 @@ const SUGGESTIONS = [
 ]
 
 const STORAGE_KEY = 'chatbot.config'
+// How wide the user dragged the sidebar, and whether they shut it. Layout is
+// a per-browser preference, not part of a conversation, so it stays local.
+const WIDTH_KEY = 'chatbot.panelWidth'
+const COLLAPSED_KEY = 'chatbot.panelCollapsed'
+const PANEL_MIN = 240
+const PANEL_MAX = 560
 // Which conversation was open. Only the id lives here — the conversation
 // itself is in Postgres, so any browser with this id sees the same history.
 const SESSION_KEY = 'chatbot.session'
@@ -46,11 +53,20 @@ export default function App() {
   // Every turn's metrics, so the panel can total the session.
   const [runs, setRuns] = useState([])
   const [panelOpen, setPanelOpen] = useState(false)
+  // Distinct from `panelOpen`, which is the narrow-screen drawer. On a wide
+  // screen the sidebar is a grid column that is always mounted, and these two
+  // say how wide it is and whether it is shut.
+  const [panelWidth, setPanelWidth] = useStoredWidth(WIDTH_KEY, 300)
+  const [panelCollapsed, setPanelCollapsed] = useStoredFlag(COLLAPSED_KEY, false)
   const [atBottom, setAtBottom] = useState(true)
   // Text pushed into the composer by a Reply click.
   const [insert, setInsert] = useState(null)
   // Index of the message whose run details are open, or null.
   const [detailsFor, setDetailsFor] = useState(null)
+  // Form ids the user dismissed. A cancelled form stays in the transcript as
+  // a record of what was asked, but must not stay fillable — and it is local
+  // only, because "I changed my mind" is not worth a database round trip.
+  const [cancelledForms, setCancelledForms] = useState(() => new Set())
   // 'system' | 'light' | 'dark' — index.html already applied the saved value.
   const [theme, setTheme] = useState(readTheme)
 
@@ -125,6 +141,33 @@ export default function App() {
     setInsert({ text: `${quoted}\n\n`, nonce: Math.random() })
   }
 
+  // A filled-in form becomes an ordinary user message: same send path, same
+  // history, same persistence. Nothing downstream needs to know a form was
+  // involved — which is why submitting one cannot get out of sync with typing
+  // the same thing by hand.
+  function submitForm(text) {
+    handleSend(text, [], { fromForm: true })
+  }
+
+  function cancelForm(spec) {
+    setCancelledForms((prev) => new Set(prev).add(spec.id))
+  }
+
+  /**
+   * Whether the card on message `index` can still be filled in.
+   *
+   * Only the last one, and only when nothing is in flight. A form further up
+   * has already been answered — by the very message sitting below it — so
+   * leaving it live is an invitation to create the same task twice. That rule
+   * also covers a reloaded conversation for free, where there is no local
+   * "already submitted" flag to consult.
+   */
+  function formStateFor(message, index) {
+    if (!message.form) return 'closed'
+    if (cancelledForms.has(message.form.id)) return 'cancelled'
+    return index === messages.length - 1 && !busy ? 'open' : 'closed'
+  }
+
   function toggleLike(index) {
     const liked = !messages[index]?.liked
     setMessages((prev) =>
@@ -196,6 +239,7 @@ export default function App() {
           max_tokens: data.max_tokens ?? prev?.max_tokens,
           web_search: data.web_search,
           search_backend: data.search_backend ?? prev?.search_backend,
+          clarix: data.clarix,
         }
         prevConfig.current = next
         return next
@@ -257,7 +301,7 @@ export default function App() {
     }
   }
 
-  async function handleSend(text, attachments = []) {
+  async function handleSend(text, attachments = [], { fromForm = false } = {}) {
     // If settings changed since the last reply, mark it in the transcript so
     // it is obvious which answer used which configuration.
     const changes = messages.length ? describeChanges(prevConfig.current, config) : null
@@ -274,6 +318,12 @@ export default function App() {
     // that produced nothing is not part of the conversation anyway.
     const forModel = history.filter((m) => m.role !== 'note' && m.content?.trim())
 
+    // A fact about this turn rather than a setting, so it rides along with the
+    // config instead of living in the panel: a form coming back is a write to
+    // perform, not a question to research, and the backend takes the search
+    // tool away for it.
+    const turnConfig = fromForm ? { ...config, from_form: true } : config
+
     // Timing for the reasoning panel. Kept as plain closure variables rather
     // than state: they are written from inside stream callbacks, where a state
     // value read back would be a render behind.
@@ -283,7 +333,7 @@ export default function App() {
     try {
       if (streaming) {
         setMessages([...history, { role: 'assistant', content: '', thinking: '' }])
-        await streamChat(forModel, config, sessionRef.current, {
+        await streamChat(forModel, turnConfig, sessionRef.current, {
           onTrace: (step) =>
             setMessages((prev) => {
               const next = [...prev]
@@ -296,6 +346,16 @@ export default function App() {
               const next = [...prev]
               const last = next[next.length - 1]
               next[next.length - 1] = { ...last, search: what }
+              return next
+            }),
+          // The model asked for details with inputs instead of a question.
+          // The card hangs off the answer it arrived with, so it scrolls with
+          // the conversation rather than floating over it.
+          onForm: (spec) =>
+            setMessages((prev) => {
+              const next = [...prev]
+              const last = next[next.length - 1]
+              next[next.length - 1] = { ...last, form: spec }
               return next
             }),
           onThinking: (piece) => {
@@ -360,7 +420,7 @@ export default function App() {
             }),
         })
       } else {
-        const data = await sendChat(forModel, config, sessionRef.current)
+        const data = await sendChat(forModel, turnConfig, sessionRef.current)
         if (data.session_id && data.session_id !== sessionRef.current) {
           sessionRef.current = data.session_id
           setSessionId(data.session_id)
@@ -419,7 +479,13 @@ export default function App() {
       (last.role === 'assistant' && !last.content && !last.thinking && !last.search))
 
   return (
-    <div className="layout">
+    <div
+      className={`layout ${panelCollapsed ? 'layout--collapsed' : ''}`}
+      // The column width is a variable rather than an inline width on the
+      // panel so the grid, the resizer's position and the collapse rule all
+      // read the same number.
+      style={{ '--panel-w': panelCollapsed ? '0px' : `${panelWidth}px` }}
+    >
       <ConfigPanel
         schema={schema}
         config={config}
@@ -452,6 +518,16 @@ export default function App() {
         onClose={() => setPanelOpen(false)}
       />
 
+      <Resizer
+        width={panelWidth}
+        onWidth={setPanelWidth}
+        collapsed={panelCollapsed}
+        onCollapsed={setPanelCollapsed}
+        min={PANEL_MIN}
+        max={PANEL_MAX}
+        label="Resize the sidebar"
+      />
+
       <div className="app">
         <header className="header">
           <div className="header__title">
@@ -461,6 +537,22 @@ export default function App() {
               aria-label="Toggle settings"
             >
               ☰
+            </button>
+            <button
+              className="ghost header__collapse"
+              onClick={() => setPanelCollapsed((v) => !v)}
+              aria-label={panelCollapsed ? 'Show the sidebar' : 'Hide the sidebar'}
+              aria-expanded={!panelCollapsed}
+              title={panelCollapsed ? 'Show the sidebar' : 'Hide the sidebar'}
+            >
+              <svg viewBox="0 0 24 24" width="15" height="15" aria-hidden="true">
+                <rect x="3" y="4" width="18" height="16" rx="2" fill="none"
+                      stroke="currentColor" strokeWidth="1.7" />
+                <path d="M9 4v16" fill="none" stroke="currentColor" strokeWidth="1.7" />
+                <path d={panelCollapsed ? 'm13 9 3 3-3 3' : 'm17 9-3 3 3 3'} fill="none"
+                      stroke="currentColor" strokeWidth="1.7"
+                      strokeLinecap="round" strokeLinejoin="round" />
+              </svg>
             </button>
             <span className="dot" />
             <h1>Chatbot</h1>
@@ -535,6 +627,10 @@ export default function App() {
               search={m.search}
               trace={m.trace}
               metrics={m.metrics}
+              form={m.form}
+              formState={formStateFor(m, i)}
+              onFormSubmit={submitForm}
+              onFormCancel={() => cancelForm(m.form)}
               pending={busy && i === messages.length - 1 && m.role === 'assistant'}
               liked={m.liked}
               onLike={() => toggleLike(i)}
@@ -597,6 +693,7 @@ function fromStored(m) {
     meta: m.model ?? undefined,
     search: m.search ?? undefined,
     trace: m.trace ?? undefined,
+    form: m.form ?? undefined,
     metrics: m.metrics ?? undefined,
     liked: m.liked,
   }
@@ -620,6 +717,8 @@ function describeChanges(before, after) {
     parts.push(`search backend → ${after.search_backend}`)
   if (before.web_search !== after.web_search)
     parts.push(`web search → ${after.web_search ? 'on' : 'off'}`)
+  if (before.clarix !== after.clarix)
+    parts.push(`Clarix workspace → ${after.clarix ? 'on' : 'off'}`)
   if (before.max_tokens !== after.max_tokens) parts.push(`max tokens → ${after.max_tokens}`)
   if (before.system_prompt !== after.system_prompt) parts.push('system prompt updated')
   return parts.length ? `Settings changed: ${parts.join(' · ')}` : null

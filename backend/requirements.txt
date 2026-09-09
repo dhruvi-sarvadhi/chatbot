@@ -14,3 +14,8 @@ anthropic>=0.69
 openai>=1.109
 ddgs>=9.15
 tavily-python>=0.5
+
+# Clarix Projects API — its responses are AES-256-GCM encrypted end to end
+# (ENABLE_PAYLOAD_ENCRYPTION), so a client needs a real AES implementation just
+# to READ them. Python's stdlib has no AES. See app/clarix_client.py.
+cryptography>=43

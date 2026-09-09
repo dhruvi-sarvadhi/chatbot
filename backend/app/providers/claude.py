@@ -58,7 +58,7 @@ class ClaudeProvider(ChatProvider):
             # "low" keeps a chat UI snappy; raise it for harder questions.
             params["output_config"] = {"effort": cfg.effort}
 
-        if cfg.web_search and caps["supports_search"]:
+        if cfg.web_search and caps["supports_search"] and not cfg.from_form:
             params["tools"] = [WEB_SEARCH_TOOL]
 
         return params

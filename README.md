@@ -189,6 +189,161 @@ curl -X POST http://127.0.0.1:8000/api/chat \
 
 ---
 
+## Clarix Projects integration
+
+The model can read and write real projects and tasks in a Clarix workspace via
+a long-lived API key, so you can say *"create a task called Fix login in the
+Apollo project"* and it happens.
+
+**Verify the connection before involving the model.** This is read-only unless
+you ask for writes:
+
+```bash
+cd backend
+.venv/bin/python clarix_smoke.py            # reads only
+.venv/bin/python clarix_smoke.py --write    # ALSO creates a real project + task
+```
+
+It prints which workspace the key belongs to and, on failure, the one thing
+worth checking next — the key, the encryption key, the gateway, or permissions.
+
+Four things about the Clarix API that are not guessable:
+
+- **There is no `/projects-api` URL prefix.** The app answers on bare paths
+  (`/projects`, `/tasks`). That prefix serves the API reference only, and the
+  paths published there carry a `{slug}` segment the gateway does not route —
+  so a client generated from that spec 404s on every call.
+- **Responses come back as plain JSON** for API keys, unlike the browser app's,
+  which are AES-GCM enveloped. `CLARIX_ENCRYPTION_KEY` is therefore OPTIONAL —
+  set it only when pointing at a Clarix build from before API-key responses
+  were sent in the clear. Never accept that key as a matter of course: it is
+  platform-wide and unrevocable, so holding a copy makes this integration a
+  fleet-wide liability guarding a key that revokes in one click.
+- **Nothing takes a name; everything takes a numeric id**, and there is no
+  name filter on `GET /projects`. `clarix_client.find_project()` does the
+  matching here — exact name, then code, then prefix, then substring, then an
+  order-independent word match so `clarix-payroll` still finds `Payroll-Clarix`
+  (people name a project by its words, not its punctuation). It
+  returns *all* candidates when a term is ambiguous rather than guessing:
+  `Support-Clarix`, `Payroll-Clarix` and `CRM-Clarix` all contain "Clarix", and
+  answering confidently about the wrong project is worse than asking which.
+- **Statuses are numeric ids, resolved per project.** There is no
+  set-status-by-name call, and an assignee must already be on the project team
+  or the write is rejected.
+- **A task needs only a name.** Type, status and priority are required
+  columns, but the API fills in the project's defaults when you omit them, so
+  the tool sends just the name. (This client used to resolve all three itself —
+  three extra HTTP calls per create, and it only ever fixed the problem for
+  *this* integration. It was fixed server-side instead.)
+
+### What the model can call
+
+The main tool is `clarix_projects`, which takes an `action` rather than
+splitting into eight near-identical tools — fewer tools means fewer wrong
+picks. Any action taking a project accepts `project_name` *or* `project_id`;
+the name is resolved for you.
+
+| Action | Does |
+|---|---|
+| `get_project` | **The one to use for "tell me about project X"** — returns the project, its tasks *and* its team in one call |
+| `list_projects` | The whole portfolio. Only for "what projects do I have" |
+| `list_tasks` · `get_task` | Tasks in a project · one task |
+| `create_project` · `create_task` · `update_task` | Writes |
+| `list_task_statuses` | Per-project status ids — required before setting a status |
+| `list_project_team` · `list_users` | Who may be assigned · the directory |
+
+`get_project` exists because "tell me about project X" is always really "what
+is in it and who is on it". Making the model chain three calls for that is how
+it ends up answering a different question — asked for one project's tasks, it
+would call `list_projects` and summarise all of them instead.
+
+### Asking for details with a form, not a question
+
+A second tool, `ask_user_form`, exists to kill this exchange:
+
+```
+user > create task in solnce
+bot  > Sure — what should be the task name/title be?
+user > ...
+bot  > And a description?
+```
+
+Three fields is three round trips, and one of them (status) is a numeric id
+the user has no way to know. So the model calls `ask_user_form` instead, and
+a card renders in the transcript with real inputs — a title box, a description
+box, and dropdowns **already populated with that project's statuses and that
+project's team**, each carrying the numeric id as its value. The user fills it
+in once and submits; the answers come back as one ordinary user message with
+the ids already resolved, and the model writes them straight through to
+`clarix_projects`.
+
+The dropdowns are the point. Options are fetched server-side in
+`tools/ask_form.py`, never guessed by the model, so a status the API would
+reject cannot be picked. Name the project (`create task in Solnce`) and the
+form arrives fully populated; leave it out (`add a task`) and the form asks
+with a project picker instead of the bot asking in prose.
+
+It degrades in one direction only: if the status or team lookup fails, the
+form still renders with the fields that need no lookup. And it is streaming-
+only — the non-streamed `/api/chat` path has no channel to push a card down,
+so there the tool tells the model to ask in text and the old behaviour stands.
+
+### Turning it off
+
+**Settings → Clarix workspace** switches the tools off for the next message.
+Two gates decide whether the model ever sees them, and they mean different
+things: the panel switch is yours, and `CLARIX_API_KEY` is whether the server
+has a key at all. The switch can only take the tools away, never conjure them
+— with no key the row is disabled and says `no key`.
+
+It defaults **on**, unlike web search, because it is already gated on a key
+existing. The switch is there to hold live writes back on a turn where they
+would be unwelcome, not to opt in. It is stored per conversation, so reopening
+an old chat restores what that chat was answered with.
+
+The key itself is never entered in, or sent to, the browser — `/api/config`
+reports only *whether* one is set. Keys live in `backend/.env`, the same rule
+this project already applies to the LLM keys.
+
+Configuration lives in `backend/.env` (git-ignored; template in
+`backend/.env.example`) — three keys: `CLARIX_API_URL`, `CLARIX_API_KEY`,
+`CLARIX_ENCRYPTION_KEY`. Leave `CLARIX_API_KEY` empty and the tools are simply
+never offered to the model.
+
+> **Keys expire, and rotating one kills the old key an hour later.** A
+> previously-working key that starts returning `401 INVALID_TOKEN` has usually
+> been rotated, not revoked — `clarix_smoke.py` says which.
+
+> **Provider support:** wired into the **OpenAI** provider, which already runs
+> tools in this process. The Claude provider only declares Anthropic's
+> *server-side* web search and has no local tool loop, so set
+> `LLM_PROVIDER=openai` to use this.
+
+---
+
+## Resizing the panels
+
+Both side panels have a draggable edge. The sidebar remembers its width and
+whether you shut it; the run-details drawer remembers its width. Both are
+per-browser, not per-conversation, so they are kept in `localStorage` rather
+than in Postgres.
+
+| Gesture | Does |
+|---|---|
+| Drag the edge | Resize. Capped at half the window — a sidebar that can eat the transcript is not a feature |
+| Drag the sidebar nearly shut | Collapses it. Drag back out from the left edge to reopen |
+| Double-click the edge | Toggle collapsed |
+| The button left of the title | Same toggle, for people who never think to drag an edge |
+| ← / → on the focused edge | Nudge 16px (48 with Shift); Home / End jump to the extremes; Enter collapses |
+
+The handle's hit area is 11px wide but it only draws a 3px line, and only on
+hover or focus — a 3px target is a miss most of the time, and a visible
+divider at rest is noise. Below 820px the sidebar stops being a column and
+becomes an overlay drawer, so there is no edge between two things to drag and
+the handle hides itself.
+
+---
+
 ## Where to look in the code
 
 | File | Why it matters |
@@ -200,12 +355,18 @@ curl -X POST http://127.0.0.1:8000/api/chat \
 | [backend/app/db.py](backend/app/db.py) | Engine, pooling, and creating the database on first run |
 | [frontend/src/components/SessionList.jsx](frontend/src/components/SessionList.jsx) | The chat history sidebar |
 | [frontend/src/components/ConfigPanel.jsx](frontend/src/components/ConfigPanel.jsx) | The left-hand settings panel |
+| [frontend/src/components/Resizer.jsx](frontend/src/components/Resizer.jsx) | The draggable edge that resizes the sidebar and the details drawer |
 | [frontend/src/components/Markdown.jsx](frontend/src/components/Markdown.jsx) | Turns a model reply into formatted output |
 | [frontend/src/lib/highlight.js](frontend/src/lib/highlight.js) | Syntax highlighting, trimmed to 10 languages |
 | [frontend/src/components/MessageActions.jsx](frontend/src/components/MessageActions.jsx) | Copy / reply / like / share row |
 | [frontend/src/components/Clamped.jsx](frontend/src/components/Clamped.jsx) | Show more / show less for long questions |
 | [frontend/src/components/RunDetails.jsx](frontend/src/components/RunDetails.jsx) | The per-answer analytics drawer |
 | [frontend/src/lib/transcript.js](frontend/src/lib/transcript.js) | Markdown + JSON conversation export |
+| [backend/app/clarix_client.py](backend/app/clarix_client.py) | Clarix HTTP client — auth, and decrypting every reply |
+| [backend/app/tools/clarix_projects.py](backend/app/tools/clarix_projects.py) | The Clarix tool the model calls, and what it tells the model when a call fails |
+| [backend/app/tools/ask_form.py](backend/app/tools/ask_form.py) | Builds the form the model shows instead of asking field by field |
+| [frontend/src/components/ToolForm.jsx](frontend/src/components/ToolForm.jsx) | Renders that form, and turns the answers back into a message |
+| [backend/clarix_smoke.py](backend/clarix_smoke.py) | Prove the Clarix key works without an LLM in the way |
 | [backend/app/providers/claude.py](backend/app/providers/claude.py) | The actual Anthropic API call |
 | [backend/app/providers/openai_provider.py](backend/app/providers/openai_provider.py) | The actual OpenAI API call |
 | [backend/app/main.py](backend/app/main.py) | HTTP routes, CORS, SSE streaming |

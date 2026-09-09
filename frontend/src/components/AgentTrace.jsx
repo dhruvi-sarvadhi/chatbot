@@ -14,6 +14,7 @@ const STEPS = {
   tool_call: { tag: 'tool', tone: 'tool' },
   tool_result: { tag: 'result', tone: 'result' },
   answer: { tag: 'answer', tone: 'done' },
+  retry: { tag: 'retry', tone: 'warn' },
   limit: { tag: 'stopped', tone: 'warn' },
 }
 

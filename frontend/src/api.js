@@ -62,6 +62,9 @@ export async function sendChat(messages, config, sessionId = null) {
  *   onStatus(what)  — "searching" / "searched": the model is looking
  *                     something up on the web
  *   onTrace(step)   — one entry of the agent loop, for the debug panel
+ *   onForm(spec)    — the model wants details it does not have, and asked for
+ *                     them as a form: render it and send the answers back as
+ *                     the next user message
  *   onDelta(text)   — the model wrote a bit more
  *   onMeta({provider, model, session_id}) — which model answered, and which
  *                     stored conversation the turn was filed under
@@ -76,7 +79,7 @@ export async function streamChat(
   messages,
   config,
   sessionId = null,
-  { onDelta, onMeta, onUsage, onThinking, onStatus, onTrace, onSaved } = {},
+  { onDelta, onMeta, onUsage, onThinking, onStatus, onTrace, onForm, onSaved } = {},
 ) {
   const res = await fetch(`${BASE}/chat/stream`, {
     method: 'POST',
@@ -109,6 +112,7 @@ export async function streamChat(
       if (event.error) throw new Error(event.error)
       if (event.trace) onTrace?.(event.trace)
       if (event.status) onStatus?.(event.status)
+      if (event.form) onForm?.(event.form)
       if (event.thinking) onThinking?.(event.thinking)
       if (event.delta) onDelta?.(event.delta)
       if (event.meta) onMeta?.(event.meta)

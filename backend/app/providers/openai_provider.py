@@ -16,10 +16,24 @@ import logging
 import time
 from collections.abc import Iterator
 
-from openai import OpenAI
+from openai import (
+    APIConnectionError,
+    APIError,
+    APIStatusError,
+    APITimeoutError,
+    OpenAI,
+)
 
 from ..catalog import model_caps
-from ..tools import SEARCH_TOOL_SCHEMA, run_search
+from ..clarix_client import get_clarix_client
+from ..tools import (
+    CLARIX_TOOL_SCHEMA,
+    FORM_TOOL_SCHEMA,
+    SEARCH_TOOL_SCHEMA,
+    build_form,
+    run_clarix,
+    run_search,
+)
 from .base import ChatProvider, ChatResult, GenerationConfig, StreamChunk, TurnMetrics
 
 log = logging.getLogger("chatbot")
@@ -27,11 +41,50 @@ log = logging.getLogger("chatbot")
 # One question rarely needs more than a couple of lookups, and every extra
 # turn is another full request. This is the stop that keeps a confused model
 # from looping until the bill notices.
-MAX_TOOL_TURNS = 3
+#
+# Raised from 3 when the Clarix tool landed: a single "create a task in the
+# Apollo project, assigned to Dev, status In Progress" legitimately needs FOUR
+# lookups before the write — list_projects, list_task_statuses, list_users,
+# then create_task — because Clarix takes numeric ids and resolves statuses
+# per project. At 3 that request always died one call short of doing anything.
+MAX_TOOL_TURNS = 5
 
 # How much of a tool result to show in the trace. Enough to see what the model
 # was actually handed; not so much that the debug panel becomes the page.
 TRACE_PREVIEW = 700
+
+# The SDK retries a failed *request* on its own, but not a request that was
+# accepted and then failed halfway through the response body — a 200 OK
+# followed by "Unable to verify model access right now. Please retry." in the
+# event stream. That one arrives as a bare APIError with no status code, and
+# it is exactly the kind that succeeds on a second attempt, so retry it here.
+MAX_ATTEMPTS = 3
+RETRY_BACKOFF = 1.0  # seconds before the first retry, doubled after each
+
+# Matched against the message of a status-less APIError. Deliberately short:
+# anything not on this list is treated as a real failure and shown to the
+# user, because silently retrying a genuine error just triples the wait.
+RETRY_HINTS = (
+    "please retry",
+    "please try again",
+    "overloaded",
+    "temporarily unavailable",
+    "server had an error",
+)
+
+
+def _retryable(exc: Exception) -> bool:
+    """Is this worth another attempt, or is it the answer?"""
+    if isinstance(exc, (APIConnectionError, APITimeoutError)):
+        return True
+    if isinstance(exc, APIStatusError):
+        # 429 and 5xx only. A 400/401/404 means the request itself is wrong,
+        # and sending it again changes nothing.
+        return exc.status_code == 429 or exc.status_code >= 500
+    if isinstance(exc, APIError):
+        low = str(exc).lower()
+        return any(hint in low for hint in RETRY_HINTS)
+    return False
 
 
 class OpenAIProvider(ChatProvider):
@@ -63,10 +116,26 @@ class OpenAIProvider(ChatProvider):
             # returns no text to show.
             params["reasoning"] = {"effort": cfg.effort, "summary": "auto"}
 
-        if cfg.web_search and caps["supports_search"]:
+        tools = []
+        if cfg.web_search and caps["supports_search"] and not cfg.from_form:
             # A plain function tool. The model can only ask for it — running
             # it is this process's job, in _run_tools below.
-            params["tools"] = [{"type": "function", **SEARCH_TOOL_SCHEMA}]
+            tools.append({"type": "function", **SEARCH_TOOL_SCHEMA})
+
+        # Two gates, and they mean different things. `cfg.clarix` is the
+        # user's switch in the panel; `configured` is whether this server has
+        # a key at all. Advertising a tool the server cannot run teaches the
+        # model to call something that always fails, and either way an unused
+        # tool costs input tokens on every single request.
+        if cfg.clarix and get_clarix_client().configured:
+            tools.append({"type": "function", **CLARIX_TOOL_SCHEMA})
+            # Offered beside it, never instead of it: the form COLLECTS the
+            # fields, `clarix_projects` is still what writes them. Gated on the
+            # same key because every form it can build is a Clarix form.
+            tools.append({"type": "function", **FORM_TOOL_SCHEMA})
+
+        if tools:
+            params["tools"] = tools
 
         return params
 
@@ -84,7 +153,9 @@ class OpenAIProvider(ChatProvider):
 
     @staticmethod
     def _run_tools(output, items: list, clock=None, backend: str = "auto",
-                   metrics: TurnMetrics | None = None) -> Iterator[StreamChunk]:
+                   metrics: TurnMetrics | None = None,
+                   forms: bool = True,
+                   seen: set | None = None) -> Iterator[StreamChunk]:
         """Execute every tool call, appending results to `items`.
 
         Yields trace chunks as it goes, so the UI can show the call before the
@@ -94,6 +165,13 @@ class OpenAIProvider(ChatProvider):
 
         Each call needs its result echoed with the same `call_id`, or the API
         rejects the follow-up request for having an unanswered call.
+
+        `seen` carries the calls already made this turn. A model that repeats
+        a call verbatim gets the same result and asks again — which is not a
+        loop the turn limit ends gracefully, it is the turn limit being spent
+        on nothing. Handing back "you already did this" is a step it can
+        actually act on. Pass a set to enable it; the caller owns it so it
+        spans every request in the turn, not just one.
         """
         for block in output:
             if block.type != "function_call":
@@ -117,13 +195,38 @@ class OpenAIProvider(ChatProvider):
                 })
 
             outcome = None
+            form = None
             tool_started = time.perf_counter()
             if metrics is not None:
                 metrics.tool_calls += 1
+
+            fingerprint = (block.name, json.dumps(args, sort_keys=True, default=str))
+            if result is None and seen is not None and fingerprint in seen:
+                result = (
+                    f"You already called {block.name} with exactly these arguments in "
+                    "this turn and the result is above. Calling it again returns the "
+                    "same thing. Use what you have: either answer the user now, or "
+                    "call a DIFFERENT tool — for anything about the user's projects "
+                    "or tasks that is clarix_projects."
+                )
+                log.warning("model repeated %s with identical arguments", block.name)
+            elif seen is not None:
+                seen.add(fingerprint)
+
             if result is None:
                 if block.name == "web_search":
                     outcome = run_search(args.get("query", ""), backend)
                     result = outcome.text
+                elif block.name == "clarix_projects":
+                    # No `outcome` — that dataclass reports search backends and
+                    # their timings, which mean nothing here. The trace still
+                    # shows the call and its result via the generic path below.
+                    result = run_clarix(args)
+                elif block.name == "ask_user_form":
+                    # The only tool whose real output goes to the BROWSER, not
+                    # to the model: the model gets an instruction to stand
+                    # down, the user gets the card.
+                    form, result = build_form(args, supported=forms)
                 else:
                     result = f"Unknown tool: {block.name}"
 
@@ -131,6 +234,13 @@ class OpenAIProvider(ChatProvider):
                 metrics.tool_ms += round((time.perf_counter() - tool_started) * 1000)
                 if outcome:
                     metrics.search_backend = outcome.used
+
+            # Outside `if clock`: a form is the point of the call, not a
+            # debugging nicety, so it is emitted whether or not a trace is
+            # being collected. The non-streaming path drains these and
+            # `forms=False` stops one being built there in the first place.
+            if form:
+                yield StreamChunk(form=form)
 
             if clock:
                 yield StreamChunk(trace={
@@ -151,13 +261,30 @@ class OpenAIProvider(ChatProvider):
                 {"type": "function_call_output", "call_id": block.call_id, "output": result}
             )
 
+    @staticmethod
+    def _retrying(call):
+        """Run `call`, giving transient upstream failures another go."""
+        for attempt in range(1, MAX_ATTEMPTS + 1):
+            try:
+                return call()
+            except Exception as exc:  # noqa: BLE001 — re-raised unless retryable
+                if attempt == MAX_ATTEMPTS or not _retryable(exc):
+                    raise
+                log.warning(
+                    "attempt %d/%d failed (%s) — retrying", attempt, MAX_ATTEMPTS, exc
+                )
+                time.sleep(RETRY_BACKOFF * 2 ** (attempt - 1))
+
     def chat(self, messages: list[dict], cfg: GenerationConfig) -> ChatResult:
         params = self._params(messages, cfg)
         convo = list(params["input"])
         thinking, sent, received = [], 0, 0
+        seen: set = set()
 
         for _ in range(MAX_TOOL_TURNS + 1):
-            response = self.client.responses.create(**{**params, "input": convo})
+            response = self._retrying(
+                lambda: self.client.responses.create(**{**params, "input": convo})
+            )
             if response.usage:
                 sent += response.usage.input_tokens
                 received += response.usage.output_tokens
@@ -174,7 +301,9 @@ class OpenAIProvider(ChatProvider):
             results = []
             # Same executor as the streaming path; without a clock it yields
             # nothing, so this just runs the tools.
-            for _ in self._run_tools(response.output, results, backend=cfg.search_backend):
+            for _ in self._run_tools(
+                response.output, results, backend=cfg.search_backend, forms=False, seen=seen
+            ):
                 pass
             if not results:
                 return ChatResult(
@@ -218,6 +347,9 @@ class OpenAIProvider(ChatProvider):
             effort=cfg.effort if "reasoning" in params else "",
         )
 
+        # Every tool call made this turn, across all of its requests.
+        seen: set = set()
+
         for turn in range(MAX_TOOL_TURNS + 1):
             tools = params.get("tools") or []
             yield StreamChunk(trace={
@@ -230,22 +362,49 @@ class OpenAIProvider(ChatProvider):
                 "ms": clock(),
             })
 
-            metrics.model_requests += 1
             model_started = time.perf_counter()
 
-            with self.client.responses.stream(**{**params, "input": convo}) as stream:
-                for event in stream:
-                    match event.type:
-                        case "response.reasoning_summary_text.delta":
-                            yield StreamChunk(thinking=event.delta)
-                        case "response.output_text.delta":
-                            yield StreamChunk(text=event.delta)
-                        case "response.output_item.added":
-                            # Our own search is about to be requested — the UI
-                            # should say so before the pause, not after it.
-                            if getattr(event.item, "type", None) == "function_call":
-                                yield StreamChunk(status="searching")
-                final = stream.get_final_response()
+            # Retry loop around one request. `sent_words` is the guard: once
+            # any of the answer has reached the browser we cannot start over,
+            # because the second attempt would append a whole second answer to
+            # the first half of the first one. Failures before that point —
+            # which is where "please retry" lands — are free to try again.
+            for attempt in range(1, MAX_ATTEMPTS + 1):
+                metrics.model_requests += 1
+                sent_words = False
+                try:
+                    with self.client.responses.stream(**{**params, "input": convo}) as stream:
+                        for event in stream:
+                            match event.type:
+                                case "response.reasoning_summary_text.delta":
+                                    sent_words = True
+                                    yield StreamChunk(thinking=event.delta)
+                                case "response.output_text.delta":
+                                    sent_words = True
+                                    yield StreamChunk(text=event.delta)
+                                case "response.output_item.added":
+                                    # Our own search is about to be requested —
+                                    # the UI should say so before the pause,
+                                    # not after it.
+                                    if getattr(event.item, "type", None) == "function_call":
+                                        yield StreamChunk(status="searching")
+                        final = stream.get_final_response()
+                    break
+                except Exception as exc:  # noqa: BLE001 — re-raised unless retryable
+                    if sent_words or attempt == MAX_ATTEMPTS or not _retryable(exc):
+                        raise
+                    delay = RETRY_BACKOFF * 2 ** (attempt - 1)
+                    log.warning(
+                        "attempt %d/%d failed (%s) — retrying in %.1fs",
+                        attempt, MAX_ATTEMPTS, exc, delay,
+                    )
+                    yield StreamChunk(trace={
+                        "step": "retry",
+                        "label": f"Request failed — retrying ({attempt}/{MAX_ATTEMPTS - 1})",
+                        "detail": f"{type(exc).__name__}: {exc}",
+                        "ms": clock(),
+                    })
+                    time.sleep(delay)
 
             metrics.model_ms += round((time.perf_counter() - model_started) * 1000)
 
@@ -271,7 +430,9 @@ class OpenAIProvider(ChatProvider):
             })
 
             results = []
-            yield from self._run_tools(final.output, results, clock, cfg.search_backend, metrics)
+            yield from self._run_tools(
+                final.output, results, clock, cfg.search_backend, metrics, seen=seen
+            )
             if not results:
                 yield StreamChunk(trace={
                     "step": "answer",

@@ -85,8 +85,14 @@ body {
 
 .layout {
   height: 100%;
+  /* The resizer is positioned against this, not laid out by the grid — a
+     third child would otherwise become a third column. */
+  position: relative;
   display: grid;
-  grid-template-columns: 300px minmax(0, 1fr);
+  grid-template-columns: var(--panel-w, 300px) minmax(0, 1fr);
+  /* Animates the collapse toggle. Suppressed mid-drag below, where a
+     transition would make the edge lag behind the pointer. */
+  transition: grid-template-columns .18s ease;
   /* Without an explicit row track the row is auto-sized, so the grid grows
      with the transcript and pushes the composer off screen instead of
      scrolling inside .chat. */
@@ -348,6 +354,16 @@ body {
   letter-spacing: .04em; color: var(--muted);
 }
 .field__hint { margin: 0; font-size: 11.5px; line-height: 1.45; color: var(--muted); }
+/* Says the setting is on but currently doing nothing — a state worth calling
+   out, since the panel would otherwise look like it had taken effect. */
+.field__hint--warn { color: var(--danger); }
+.field__hint code {
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 10.5px;
+  padding: 1px 4px;
+  border-radius: 4px;
+  background: var(--bot-bubble);
+}
 
 .field select,
 .field textarea,
@@ -442,6 +458,69 @@ body {
 .header__gear { display: none; padding: 4px 9px; font-size: 14px; line-height: 1; }
 .scrim { display: none; }
 
+/* ── Resizable edges ────────────────────────────────────────
+   A hit area much wider than the line it draws: 3px of visible border would
+   be a 3px target, which is a miss most of the time. The line only appears on
+   hover or focus, so at rest the layout stays quiet. */
+.resizer {
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  left: var(--panel-w, 300px);
+  width: 11px;
+  margin-left: -5px;
+  z-index: 15;
+  cursor: col-resize;
+  touch-action: none;          /* the drag is ours, not the browser's scroll */
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: transparent;
+  border: 0;
+}
+.resizer--details {
+  /* Fixed to the drawer's own left edge rather than the window's, so it
+     follows the width it is setting. */
+  left: 0;
+}
+
+/* The line, drawn by a child so the hit area itself stays invisible. */
+.resizer__grip {
+  width: 3px;
+  height: 100%;
+  border-radius: 3px;
+  background: transparent;
+  transition: background .15s;
+}
+.resizer:hover .resizer__grip,
+.resizer.is-dragging .resizer__grip { background: var(--accent); }
+.resizer:focus-visible { outline: none; }
+.resizer:focus-visible .resizer__grip {
+  background: var(--accent);
+  box-shadow: 0 0 0 2px color-mix(in srgb, var(--accent) 25%, transparent);
+}
+
+/* Shut, the handle is the only way back by dragging — so it stops hiding, and
+   drops the negative margin that would otherwise push half its grab area off
+   the left edge of the window. */
+.resizer.is-collapsed { margin-left: 0; }
+.resizer.is-collapsed .resizer__grip { background: var(--border); }
+.resizer.is-collapsed:hover .resizer__grip { background: var(--accent); }
+
+.layout--collapsed .panel {
+  /* The panel keeps its DOM (and its scroll position, and its state) at zero
+     width; without this its contents would spill across the transcript. */
+  overflow: hidden;
+  pointer-events: none;
+}
+
+/* While dragging, the whole page shows the resize cursor and stops selecting
+   text — otherwise a drag across the transcript highlights it. */
+body.is-resizing { cursor: col-resize; user-select: none; }
+body.is-resizing .layout { transition: none; }
+
+.header__collapse { display: inline-flex; align-items: center; padding: 4px 8px; }
+
 /* ── Narrow screens: panel becomes a drawer ─────────────── */
 @media (max-width: 820px) {
   .layout { grid-template-columns: minmax(0, 1fr); }
@@ -461,6 +540,11 @@ body {
 
   .app { border-left: none; }
   .header__gear { display: block; }
+  /* The sidebar is an overlay here, not a column, so there is no edge
+     between two things to drag — and collapsing it is what closing it is. */
+  .resizer:not(.resizer--details) { display: none; }
+  .header__collapse { display: none; }
+  .layout--collapsed .panel { pointer-events: auto; }
 
   .scrim {
     display: block;
@@ -1183,6 +1267,7 @@ body {
   position: fixed;
   top: 0; right: 0; bottom: 0;
   z-index: 41;
+  /* A starting width; the inline style from the drag handle overrides it. */
   width: 460px;
   max-width: 94vw;
   display: flex;
@@ -1635,3 +1720,256 @@ body {
 /* The composer is a single flex row; attachments need their own line above
    the textarea, which only works once the row is allowed to wrap. */
 .composer { flex-wrap: wrap; }
+
+/* ── Tool form ──────────────────────────────────────────────
+   The card the model shows instead of asking for fields one at a time.
+
+   Deliberately NOT a bubble: a bubble reads as something that was said, and
+   this is something to do. It gets the panel background, a full-width box and
+   its own header — the same weight as the settings panel, because it asks for
+   the same kind of attention. */
+/* A bot column is content-sized, so without this the card would only be as
+   wide as its own header text — a short title would give a narrow form. */
+.msg__wrap:has(.toolform) { width: 100%; }
+
+.toolform {
+  align-self: stretch;
+  width: 100%;
+  margin-top: 6px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  background: var(--panel);
+  overflow: hidden;
+  box-shadow: 0 1px 2px rgb(0 0 0 / .04), 0 8px 20px -14px rgb(0 0 0 / .28);
+  animation: toolform-in .22s ease-out both;
+}
+
+@keyframes toolform-in {
+  from { opacity: 0; transform: translateY(6px); }
+  to   { opacity: 1; transform: none; }
+}
+@media (prefers-reduced-motion: reduce) {
+  .toolform { animation: none; }
+}
+
+/* ── header ── */
+.toolform__head {
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  padding: 11px 14px;
+  border-bottom: 1px solid var(--border);
+  background: linear-gradient(
+    to bottom,
+    color-mix(in srgb, var(--accent-soft) 70%, transparent),
+    color-mix(in srgb, var(--accent-soft) 30%, transparent)
+  );
+}
+.toolform__icon { color: var(--accent); flex: none; }
+.toolform__title {
+  margin: 0;
+  flex: 1;
+  min-width: 0;
+  font-size: 13.5px;
+  font-weight: 600;
+  letter-spacing: -.01em;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.toolform__tag {
+  flex: none;
+  font-size: 10.5px;
+  font-weight: 600;
+  letter-spacing: .03em;
+  text-transform: uppercase;
+  color: var(--accent);
+  background: var(--panel);
+  border: 1px solid color-mix(in srgb, var(--accent) 30%, var(--border));
+  border-radius: 999px;
+  padding: 3px 9px;
+  white-space: nowrap;
+}
+
+/* ── fields ── */
+.toolform__body {
+  display: grid;
+  grid-template-columns: 1fr;
+  gap: 14px;
+  padding: 15px 14px;
+}
+/* Two columns once there is room. The spec says which fields pair up, so the
+   grid never has to guess from a field's name — see `span` in ask_form.py. */
+@media (min-width: 640px) {
+  .toolform__body { grid-template-columns: 1fr 1fr; }
+  .toolform__field--full { grid-column: 1 / -1; }
+}
+
+.toolform__field { display: flex; flex-direction: column; gap: 6px; min-width: 0; }
+
+.toolform__label {
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: .05em;
+  text-transform: uppercase;
+  color: var(--muted);
+}
+.toolform__req { color: var(--accent); margin-left: 3px; }
+
+.toolform__input {
+  font: inherit;
+  font-size: 13.5px;
+  width: 100%;
+  padding: 9px 11px;
+  color: var(--text);
+  background: var(--bg);
+  border: 1px solid var(--border);
+  border-radius: 9px;
+  transition: border-color .15s, box-shadow .15s, background .15s;
+}
+.toolform__input::placeholder { color: var(--muted); opacity: .75; }
+.toolform__input:hover:not(:disabled) { border-color: color-mix(in srgb, var(--muted) 45%, var(--border)); }
+.toolform__input:focus-visible {
+  outline: none;
+  background: var(--panel);
+  border-color: var(--accent);
+  box-shadow: 0 0 0 3px color-mix(in srgb, var(--accent) 16%, transparent);
+}
+.toolform__input--area { resize: vertical; min-height: 66px; line-height: 1.5; }
+.toolform__input.is-bad { border-color: var(--danger); }
+.toolform__input:disabled { opacity: .8; cursor: default; }
+
+.toolform__hint { font-size: 11px; line-height: 1.4; color: var(--muted); }
+
+/* ── select: native behaviour, our chrome ── */
+.toolform__picker { position: relative; display: flex; align-items: center; }
+.toolform__input--select {
+  appearance: none;
+  padding-right: 32px;   /* room for the chevron */
+  cursor: pointer;
+}
+.toolform__input--inset { padding-left: 36px; }  /* room for the avatar */
+.toolform__chevron {
+  position: absolute;
+  right: 10px;
+  color: var(--muted);
+  pointer-events: none;
+}
+.toolform__avatar {
+  position: absolute;
+  left: 7px;
+  display: grid;
+  place-items: center;
+  width: 22px; height: 22px;
+  border-radius: 50%;
+  font-size: 9.5px;
+  font-weight: 700;
+  letter-spacing: .02em;
+  color: #fff;
+  pointer-events: none;
+}
+
+/* ── status pills: one click instead of open-aim-close ── */
+.toolform__pills { display: flex; flex-wrap: wrap; gap: 6px; }
+
+.toolform__pill {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  /* Matches the height of a select in the next column, so a half-width pair
+     sits on one line rather than almost on one line. */
+  min-height: 37px;
+  padding: 6px 12px;
+  font-size: 12.5px;
+  color: var(--muted);
+  background: var(--bg);
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  cursor: pointer;
+  user-select: none;
+  transition: border-color .15s, background .15s, color .15s;
+}
+/* The radio stays in the tab order and keeps arrow-key navigation — it is
+   only invisible, never removed. */
+.toolform__pill input {
+  position: absolute;
+  width: 1px; height: 1px;
+  opacity: 0;
+  pointer-events: none;
+}
+.toolform__pill:hover { color: var(--text); border-color: var(--muted); }
+.toolform__pill.is-on {
+  color: var(--text);
+  font-weight: 600;
+  background: var(--accent-soft);
+  border-color: color-mix(in srgb, var(--accent) 55%, var(--border));
+}
+.toolform__pill:has(input:focus-visible) {
+  box-shadow: 0 0 0 3px color-mix(in srgb, var(--accent) 16%, transparent);
+}
+.toolform__pill:has(input:disabled) { cursor: default; }
+.toolform__dot { width: 7px; height: 7px; border-radius: 50%; flex: none; }
+
+/* ── footer ── */
+.toolform__foot {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 8px;
+  padding: 11px 14px;
+  border-top: 1px solid var(--border);
+  background: color-mix(in srgb, var(--bot-bubble) 55%, transparent);
+}
+
+.toolform__shortcut {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  margin-right: auto;
+  font-size: 11.5px;
+  color: var(--muted);
+}
+.toolform__shortcut kbd {
+  font-family: inherit;
+  font-size: 10.5px;
+  line-height: 1;
+  padding: 3px 5px;
+  color: var(--muted);
+  background: var(--panel);
+  border: 1px solid var(--border);
+  border-bottom-width: 2px;
+  border-radius: 5px;
+}
+.toolform__error { margin-right: auto; font-size: 12px; color: var(--danger); }
+
+.toolform__submit {
+  font: inherit;
+  font-size: 13px;
+  font-weight: 600;
+  padding: 7px 15px;
+  color: #fff;
+  background: var(--accent);
+  border: 1px solid transparent;
+  border-radius: 8px;
+  cursor: pointer;
+  transition: filter .15s, box-shadow .15s;
+  box-shadow: 0 1px 2px color-mix(in srgb, var(--accent) 35%, transparent);
+}
+.toolform__submit:hover { filter: brightness(1.08); }
+.toolform__submit:focus-visible {
+  outline: none;
+  box-shadow: 0 0 0 3px color-mix(in srgb, var(--accent) 30%, transparent);
+}
+
+/* A form that can no longer be filled in stays on screen — it is the record
+   of what was asked — but recedes, because the answer is the message below. */
+.toolform--closed {
+  box-shadow: none;
+  background: color-mix(in srgb, var(--panel) 60%, transparent);
+}
+.toolform--closed .toolform__body { opacity: .6; }
+.toolform__foot--quiet {
+  justify-content: flex-start;
+  font-size: 11.5px;
+  color: var(--muted);
+}

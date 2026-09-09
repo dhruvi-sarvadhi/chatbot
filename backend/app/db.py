@@ -67,6 +67,27 @@ def ensure_database() -> None:
         admin.dispose()
 
 
+# Columns added to a table that already exists. `create_all` creates tables
+# and stops there — it will not alter one it finds — so a database created
+# before a column existed keeps answering queries that no longer match the
+# model, and every insert fails on the missing column. This is the whole
+# migration story for this app: additive, idempotent, and small enough to read.
+# Anything more (renames, backfills, dropped columns) wants Alembic.
+ADDED_COLUMNS = [
+    ("messages", "form", "JSONB"),
+    ("sessions", "clarix", "BOOLEAN NOT NULL DEFAULT TRUE"),
+]
+
+
+def ensure_columns() -> None:
+    """Add any column the model has and the live table does not."""
+    with engine.begin() as conn:
+        for table, column, ddl in ADDED_COLUMNS:
+            conn.execute(
+                text(f'ALTER TABLE "{table}" ADD COLUMN IF NOT EXISTS "{column}" {ddl}')
+            )
+
+
 def init_db() -> bool:
     """Create the database and its tables. Returns False if Postgres is down.
 
@@ -76,6 +97,7 @@ def init_db() -> bool:
     try:
         ensure_database()
         Base.metadata.create_all(engine)
+        ensure_columns()
         log.info("database ready: %s", make_url(settings.database_url).render_as_string())
         return True
     except SQLAlchemyError as exc:

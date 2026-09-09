@@ -1,5 +1,6 @@
 import { useEffect } from 'react'
 import AgentTrace from './AgentTrace.jsx'
+import Resizer, { useStoredWidth } from './Resizer.jsx'
 
 // Everything about one answer, in a drawer: what it cost, where the time
 // went, and how it compares with the other answers in this session.
@@ -13,7 +14,15 @@ const fmt = new Intl.NumberFormat()
 const secs = (n) => `${(n / 1000).toFixed(1)}s`
 const pct = (part, whole) => (whole > 0 ? Math.round((part / whole) * 100) : 0)
 
+// Wide enough for the three headline tiles to keep their own line; the drag
+// handle is there because the trace panel below them is the opposite — long
+// tool arguments want as much room as the screen can spare.
+const DETAILS_MIN = 340
+const DETAILS_MAX = 900
+
 export default function RunDetails({ open, run, trace, runs = [], onClose }) {
+  const [width, setWidth] = useStoredWidth('chatbot.detailsWidth', 460)
+
   // Escape closes, like any drawer.
   useEffect(() => {
     if (!open) return
@@ -32,7 +41,20 @@ export default function RunDetails({ open, run, trace, runs = [], onClose }) {
     <>
       <div className="scrim scrim--details" onClick={onClose} />
 
-      <aside className="details" role="dialog" aria-label="Run details">
+      <aside className="details" role="dialog" aria-label="Run details" style={{ width }}>
+        {/* Anchored to this drawer's own left edge, so it travels with the
+            width it is setting. Closing rather than collapsing is what the ✕
+            is for, so this one has no collapse. */}
+        <Resizer
+          width={width}
+          onWidth={setWidth}
+          min={DETAILS_MIN}
+          max={DETAILS_MAX}
+          side="right"
+          label="Resize the details drawer"
+          className="resizer--details"
+        />
+
         <header className="details__head">
           <div>
             <h2>This answer</h2>
