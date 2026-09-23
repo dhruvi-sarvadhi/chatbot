@@ -16,5 +16,89 @@ frontend/dist/
 .vscode/
 backend/.env.bak.1787991353
 
-# Generated images — files on disk, not source
-backend/media/
+now integrate the open api 6 astra 
+diff section for that integration the api for this
+
+
+use configuration for this:
+
+import http.client
+import json
+
+conn = http.client.HTTPSConnection("api.kie.ai")
+payload = json.dumps({
+   "model": "gpt-6-astra",
+   "input": [
+      {
+         "role": "user",
+         "content": [
+            {
+               "type": "input_text",
+               "text": "What is in this image?"
+            },
+            {
+               "type": "input_image",
+               "image_url": "https://file.aiquickdraw.com/custom-page/akr/section-images/1759055072437dqlsclj2.png"
+            }
+         ]
+      }
+   ],
+   "tools": [
+      {
+         "type": "web_search"
+      }
+   ],
+   "reasoning": {
+      "effort": "high"
+   }
+})
+headers = {
+   'Authorization': 'Bearer <token>',
+   'Content-Type': 'application/json'
+}
+conn.request("POST", "/codex/v1/responses", payload, headers)
+res = conn.getresponse()
+data = res.read()
+print(data.decode("utf-8"))
+
+
+try api : post: import http.client
+import json
+
+conn = http.client.HTTPSConnection("api.kie.ai")
+payload = json.dumps({
+   "model": "gpt-6-astra",
+   "input": [
+      {
+         "role": "user",
+         "content": [
+            {
+               "type": "input_text",
+               "text": "What is in this image?"
+            },
+            {
+               "type": "input_image",
+               "image_url": "https://file.aiquickdraw.com/custom-page/akr/section-images/1759055072437dqlsclj2.png"
+            }
+         ]
+      }
+   ],
+   "tools": [
+      {
+         "type": "web_search"
+      }
+   ],
+   "reasoning": {
+      "effort": "high"
+   }
+})
+headers = {
+   'Authorization': 'Bearer <token>',
+   'Content-Type': 'application/json'
+}
+conn.request("POST", "/codex/v1/responses", payload, headers)
+res = conn.getresponse()
+data = res.read()
+print(data.decode("utf-8"))
+
+credential add for this access key :8e8396d0adf88ac3c6947cdd6dd7c41c and for the learning perpose and for the expolor this model inegtrarte this into our chstbot.
