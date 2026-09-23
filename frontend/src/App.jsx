@@ -358,6 +358,16 @@ export default function App() {
               next[next.length - 1] = { ...last, form: spec }
               return next
             }),
+          // A picture lands whole, the moment it is drawn — there is no
+          // partial image to stream — so it is appended rather than
+          // accumulated the way text is.
+          onImage: (img) =>
+            setMessages((prev) => {
+              const next = [...prev]
+              const last = next[next.length - 1]
+              next[next.length - 1] = { ...last, images: [...(last.images ?? []), img] }
+              return next
+            }),
           onThinking: (piece) => {
             thinkStart ??= performance.now()
             setMessages((prev) => {
@@ -436,6 +446,9 @@ export default function App() {
             content: data.reply,
             meta: data.model,
             thinking: data.thinking,
+            // The streamed path receives these one at a time as onImage; here
+            // the whole answer arrives at once, pictures included.
+            images: data.images?.length ? data.images : undefined,
           },
         ])
       }
@@ -628,6 +641,7 @@ export default function App() {
               trace={m.trace}
               metrics={m.metrics}
               form={m.form}
+              images={m.images}
               formState={formStateFor(m, i)}
               onFormSubmit={submitForm}
               onFormCancel={() => cancelForm(m.form)}
@@ -694,6 +708,7 @@ function fromStored(m) {
     search: m.search ?? undefined,
     trace: m.trace ?? undefined,
     form: m.form ?? undefined,
+    images: m.images ?? undefined,
     metrics: m.metrics ?? undefined,
     liked: m.liked,
   }
@@ -717,6 +732,8 @@ function describeChanges(before, after) {
     parts.push(`search backend → ${after.search_backend}`)
   if (before.web_search !== after.web_search)
     parts.push(`web search → ${after.web_search ? 'on' : 'off'}`)
+  if (before.image_gen !== after.image_gen)
+    parts.push(`image generation → ${after.image_gen ? 'on' : 'off'}`)
   if (before.clarix !== after.clarix)
     parts.push(`Clarix workspace → ${after.clarix ? 'on' : 'off'}`)
   if (before.max_tokens !== after.max_tokens) parts.push(`max tokens → ${after.max_tokens}`)

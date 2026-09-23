@@ -9,6 +9,10 @@ Web search here is OUR function, not OpenAI's hosted tool: the model asks for
 a search, this file runs it against a free provider, and the results go back
 in a second request. That is a real agent loop — the hosted tool hides it and
 charges for the privilege.
+
+This class is also the base for any other host that speaks the same API —
+see kie_provider.py, which is this file pointed at kie.ai. Hence `self.name`
+and `create_extras` below: the few places a subclass needs to differ.
 """
 
 import json
@@ -73,6 +77,42 @@ RETRY_HINTS = (
 )
 
 
+# The SDK raises this when a stream ends without its `response.completed`
+# event. Matched on the distinctive half of the message because the exception
+# itself is a bare RuntimeError, far too broad to act on by type.
+TRUNCATED_STREAM = "response.completed"
+
+
+class _TruncatedResponse:
+    """What the model produced, when the stream died before saying so.
+
+    kie.ai drops long streams under load. The output items have all already
+    arrived by then — `response.output_item.done` fires per item, well before
+    the terminal event — so the turn is usually complete in every way that
+    matters, and throwing it away would mean re-billing an image that has
+    already been drawn and paid for.
+
+    Usage is the one real casualty: token counts only ever come with the
+    terminal event. `None` is honest about that, and every reader already
+    handles a response without usage.
+    """
+
+    usage = None
+
+    def __init__(self, output: list) -> None:
+        self.output = output
+
+    @property
+    def output_text(self) -> str:
+        return "".join(
+            part.text
+            for block in self.output
+            if block.type == "message"
+            for part in getattr(block, "content", [])
+            if getattr(part, "type", None) == "output_text"
+        )
+
+
 def _retryable(exc: Exception) -> bool:
     """Is this worth another attempt, or is it the answer?"""
     if isinstance(exc, (APIConnectionError, APITimeoutError)):
@@ -90,6 +130,12 @@ def _retryable(exc: Exception) -> bool:
 class OpenAIProvider(ChatProvider):
     name = "openai"
 
+    # Extra kwargs for the non-streamed `responses.create` call only. Empty
+    # here; the Kie subclass uses it to pin `stream=False`, because that
+    # gateway streams unless told not to. Not applied to `responses.stream`,
+    # which sets `stream` itself and would reject a second copy.
+    create_extras: dict = {}
+
     def __init__(self, api_key: str, default_model: str) -> None:
         if not api_key:
             raise RuntimeError("OPENAI_API_KEY is missing — set it in backend/.env")
@@ -98,7 +144,10 @@ class OpenAIProvider(ChatProvider):
 
     def _params(self, messages: list[dict], cfg: GenerationConfig) -> dict:
         model = cfg.model or self.default_model
-        caps = model_caps("openai", model)
+        # `self.name` rather than a literal: subclasses share this builder but
+        # have their own catalog entry, and reading the wrong one would offer
+        # a model parameters it rejects.
+        caps = model_caps(self.name, model)
 
         params = {
             "model": model,
@@ -110,11 +159,15 @@ class OpenAIProvider(ChatProvider):
             "max_output_tokens": cfg.max_tokens,
         }
 
-        if caps["supports_thinking"]:
-            # `summary` is the opt-in that makes the reasoning readable —
-            # without it the model still reasons (and still bills you) but
-            # returns no text to show.
-            params["reasoning"] = {"effort": cfg.effort, "summary": "auto"}
+        if caps["supports_effort"]:
+            params["reasoning"] = {"effort": cfg.effort}
+            if caps["supports_thinking"]:
+                # `summary` is the opt-in that makes the reasoning readable —
+                # without it the model still reasons (and still bills you) but
+                # returns no text to show. Asking for it where the endpoint
+                # never sends one back is a wasted parameter, not an error,
+                # so it is gated separately from the effort dial above.
+                params["reasoning"]["summary"] = "auto"
 
         tools = []
         if cfg.web_search and caps["supports_search"] and not cfg.from_form:
@@ -149,7 +202,35 @@ class OpenAIProvider(ChatProvider):
         """
         item = block.model_dump(exclude_none=True)
         item.pop("status", None)
+        # A generated image round-trips by id, never by value. `result` is
+        # megabytes of base64 the server already has; sending it back would
+        # pay the upload on every subsequent request of the turn.
+        if item.get("type") == "image_generation_call":
+            item.pop("result", None)
         return item
+
+    @staticmethod
+    def _images(output) -> list[dict]:
+        """Finished images in one response, as plain dicts.
+
+        A hosted tool, so unlike `_run_tools` there is nothing to execute —
+        the picture is already drawn by the time the block reaches us. The
+        base64 is carried as-is; whoever consumes it decides where it lands.
+        """
+        found = []
+        for block in output or []:
+            if block.type != "image_generation_call" or not getattr(block, "result", None):
+                continue
+            found.append({
+                "b64": block.result,
+                "output_format": getattr(block, "output_format", "png") or "png",
+                "size": getattr(block, "size", "") or "",
+                # What the model actually asked the image model for, which is
+                # rarely what the user typed. Worth showing: it explains why
+                # the picture looks the way it does.
+                "revised_prompt": getattr(block, "revised_prompt", "") or "",
+            })
+        return found
 
     @staticmethod
     def _run_tools(output, items: list, clock=None, backend: str = "auto",
@@ -173,7 +254,7 @@ class OpenAIProvider(ChatProvider):
         actually act on. Pass a set to enable it; the caller owns it so it
         spans every request in the turn, not just one.
         """
-        for block in output:
+        for block in output or []:
             if block.type != "function_call":
                 continue
 
@@ -262,13 +343,37 @@ class OpenAIProvider(ChatProvider):
             )
 
     @staticmethod
-    def _retrying(call):
+    def _stream_refusal(stream) -> str | None:
+        """Is this "stream" actually a refusal? Checked before reading it.
+
+        A no-op for OpenAI. Overridden where a gateway answers the streaming
+        endpoint with something that is not a stream at all — which can only
+        be inspected before the SSE decoder consumes the body.
+        """
+        return None
+
+    @staticmethod
+    def _check(response) -> None:
+        """Raise if this 'success' is really a failure in disguise.
+
+        A no-op for OpenAI, which reports failures with HTTP status codes the
+        SDK already turns into exceptions. Overridden where a gateway answers
+        200 and buries the error in the body.
+        """
+
+    @staticmethod
+    def _should_retry(exc: Exception) -> bool:
+        """Worth another attempt? Overridden where a gateway fails its own way."""
+        return _retryable(exc)
+
+    @classmethod
+    def _retrying(cls, call):
         """Run `call`, giving transient upstream failures another go."""
         for attempt in range(1, MAX_ATTEMPTS + 1):
             try:
                 return call()
             except Exception as exc:  # noqa: BLE001 — re-raised unless retryable
-                if attempt == MAX_ATTEMPTS or not _retryable(exc):
+                if attempt == MAX_ATTEMPTS or not cls._should_retry(exc):
                     raise
                 log.warning(
                     "attempt %d/%d failed (%s) — retrying", attempt, MAX_ATTEMPTS, exc
@@ -279,12 +384,17 @@ class OpenAIProvider(ChatProvider):
         params = self._params(messages, cfg)
         convo = list(params["input"])
         thinking, sent, received = [], 0, 0
+        images: list[dict] = []
         seen: set = set()
 
         for _ in range(MAX_TOOL_TURNS + 1):
             response = self._retrying(
-                lambda: self.client.responses.create(**{**params, "input": convo})
+                lambda: self.client.responses.create(
+                    **{**params, "input": convo, **self.create_extras}
+                )
             )
+            self._check(response)
+
             if response.usage:
                 sent += response.usage.input_tokens
                 received += response.usage.output_tokens
@@ -293,10 +403,12 @@ class OpenAIProvider(ChatProvider):
             # summary parts — not as a field on the message.
             thinking += [
                 part.text
-                for block in response.output
+                for block in response.output or []
                 if block.type == "reasoning"
                 for part in block.summary
             ]
+
+            images += self._images(response.output)
 
             results = []
             # Same executor as the streaming path; without a clock it yields
@@ -311,6 +423,7 @@ class OpenAIProvider(ChatProvider):
                     thinking="".join(thinking),
                     input_tokens=sent,
                     output_tokens=received,
+                    images=images,
                 )
 
             # The model's own call blocks must go back too, not just our
@@ -323,6 +436,7 @@ class OpenAIProvider(ChatProvider):
             thinking="".join(thinking),
             input_tokens=sent,
             output_tokens=received,
+            images=images,
         )
 
     def stream(self, messages: list[dict], cfg: GenerationConfig) -> Iterator[StreamChunk]:
@@ -357,7 +471,12 @@ class OpenAIProvider(ChatProvider):
                 "label": f"Request {turn + 1} → {params['model']}",
                 "detail": (
                     f"{len(convo)} input item(s), {len(tools)} tool(s) offered"
-                    + (f": {', '.join(t['name'] for t in tools)}" if tools else "")
+                    # Function tools are named; a hosted tool like
+                    # image_generation carries only its type.
+                    + (
+                        f": {', '.join(t.get('name') or t['type'] for t in tools)}"
+                        if tools else ""
+                    )
                 ),
                 "ms": clock(),
             })
@@ -372,8 +491,20 @@ class OpenAIProvider(ChatProvider):
             for attempt in range(1, MAX_ATTEMPTS + 1):
                 metrics.model_requests += 1
                 sent_words = False
+                # Every output item finished so far this attempt. Reset per
+                # attempt: a retry starts a fresh response, and mixing the two
+                # would answer the new request with the old one's blocks.
+                done_items: list = []
                 try:
                     with self.client.responses.stream(**{**params, "input": convo}) as stream:
+                        # Must happen before the first read: the SSE decoder
+                        # consumes the body, and a non-stream body cannot be
+                        # recovered afterwards. Costs nothing on a real
+                        # stream, which is recognised by its content type.
+                        refusal = self._stream_refusal(stream)
+                        if refusal:
+                            raise RuntimeError(refusal)
+
                         for event in stream:
                             match event.type:
                                 case "response.reasoning_summary_text.delta":
@@ -382,16 +513,53 @@ class OpenAIProvider(ChatProvider):
                                 case "response.output_text.delta":
                                     sent_words = True
                                     yield StreamChunk(text=event.delta)
+                                case "response.image_generation_call.generating":
+                                    # Drawing takes tens of seconds with no
+                                    # output at all. Without this the UI looks
+                                    # hung for the whole of it.
+                                    yield StreamChunk(status="drawing")
+                                case "response.output_item.done":
+                                    done_items.append(event.item)
+                                    # Emitted as soon as THIS image is final,
+                                    # not at the end of the turn: the model
+                                    # usually writes a caption afterwards, and
+                                    # the picture should not wait for prose.
+                                    if getattr(event.item, "type", None) == "image_generation_call":
+                                        sent_words = True
+                                        for img in self._images([event.item]):
+                                            yield StreamChunk(image=img)
+                                            yield StreamChunk(status="drew")
                                 case "response.output_item.added":
                                     # Our own search is about to be requested —
                                     # the UI should say so before the pause,
                                     # not after it.
                                     if getattr(event.item, "type", None) == "function_call":
                                         yield StreamChunk(status="searching")
-                        final = stream.get_final_response()
+                        try:
+                            final = stream.get_final_response()
+                        except RuntimeError as exc:
+                            # Nothing arrived at all — genuinely a failed
+                            # request, so let the retry logic below have it.
+                            if TRUNCATED_STREAM not in str(exc) or not done_items:
+                                raise
+                            log.warning(
+                                "stream ended without its terminal event — "
+                                "salvaging %d output item(s)", len(done_items),
+                            )
+                            final = _TruncatedResponse(done_items)
+                            yield StreamChunk(trace={
+                                "step": "truncated",
+                                "label": "Stream ended early — kept what arrived",
+                                "detail": (
+                                    f"{len(done_items)} output item(s) received before the "
+                                    "provider dropped the connection. Token counts for this "
+                                    "request are unavailable."
+                                ),
+                                "ms": clock(),
+                            })
                     break
                 except Exception as exc:  # noqa: BLE001 — re-raised unless retryable
-                    if sent_words or attempt == MAX_ATTEMPTS or not _retryable(exc):
+                    if sent_words or attempt == MAX_ATTEMPTS or not self._should_retry(exc):
                         raise
                     delay = RETRY_BACKOFF * 2 ** (attempt - 1)
                     log.warning(
@@ -407,6 +575,7 @@ class OpenAIProvider(ChatProvider):
                     time.sleep(delay)
 
             metrics.model_ms += round((time.perf_counter() - model_started) * 1000)
+            self._check(final)
 
             if final.usage:
                 sent += final.usage.input_tokens

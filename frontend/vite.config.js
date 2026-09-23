@@ -12,6 +12,13 @@ export default defineConfig({
         target: 'http://127.0.0.1:8000',
         changeOrigin: true,
       },
+      // Generated images are files the backend serves, not bundled assets.
+      // Proxied so an <img src="/media/…"> works unchanged in dev and behind
+      // a single origin in production.
+      '/media': {
+        target: 'http://127.0.0.1:8000',
+        changeOrigin: true,
+      },
     },
   },
 })

@@ -12,7 +12,7 @@ from pydantic import UUID4, BaseModel, ConfigDict, Field, model_validator
 from .catalog import EFFORT_LEVELS
 from .tools import BACKENDS as SEARCH_BACKENDS
 
-Provider = Literal["claude", "openai"]
+Provider = Literal["claude", "openai", "kie"]
 Effort = Literal["low", "medium", "high", "xhigh", "max"]
 SearchBackend = Literal["auto", "tavily", "duckduckgo", "compare"]
 
@@ -70,6 +70,10 @@ class ChatConfig(BaseModel):
     # gated on a key existing at all: the switch is there to hold the tools
     # back on a turn where a live write would be unwelcome, not to opt in.
     clarix: bool = True
+    # Let the model draw pictures with the provider's hosted image tool.
+    # Off by default: an image costs far more than a sentence, and a model
+    # offered the tool will sometimes reach for it uninvited.
+    image_gen: bool = False
     # Set by the UI when this message is a FORM being submitted, not something
     # the user typed. It is a fact about the turn, not a setting — the panel
     # has no switch for it. See GenerationConfig.from_form for what it buys.
@@ -122,6 +126,8 @@ class ChatResponse(BaseModel):
     # The model's summarized reasoning, when the model produced any and the
     # request asked for it. Empty string means "no reasoning to show".
     thinking: str = ""
+    # Pictures the model drew, as URLs under /media — never the bytes.
+    images: list[dict] = Field(default_factory=list)
 
 
 class ModelOption(BaseModel):
@@ -135,6 +141,7 @@ class ModelOption(BaseModel):
     supports_effort: bool = False
     supports_thinking: bool = False
     supports_search: bool = False
+    supports_images: bool = False
 
 
 class ProviderOption(BaseModel):
@@ -217,6 +224,7 @@ class MessageOut(BaseModel):
     search: str | None = None
     trace: list | None = None
     form: dict | None = None
+    images: list | None = None
     liked: bool = False
     input_tokens: int | None = None
     output_tokens: int | None = None

@@ -16,6 +16,7 @@ from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 from fastapi import Depends, FastAPI, HTTPException, Query
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
+from fastapi.staticfiles import StaticFiles
 from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.orm import Session as DbSession
 
@@ -23,6 +24,7 @@ from . import store
 from .catalog import PROVIDERS
 from .config import get_settings
 from .db import get_db, init_db, session_scope
+from .media import MEDIA_URL_PREFIX, media_dir, save_image
 from .pricing import estimate_cost
 from .providers import GenerationConfig, get_provider
 from .providers.base import TurnMetrics
@@ -81,7 +83,16 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-KEY_ENV_NAME = {"claude": "ANTHROPIC_API_KEY", "openai": "OPENAI_API_KEY"}
+# Generated images are files on disk, served read-only from here. Mounted at
+# import time so the directory exists before the first request; the URLs stored
+# in the database are relative to this prefix.
+app.mount(MEDIA_URL_PREFIX, StaticFiles(directory=media_dir()), name="media")
+
+KEY_ENV_NAME = {
+    "claude": "ANTHROPIC_API_KEY",
+    "openai": "OPENAI_API_KEY",
+    "kie": "KIE_API_KEY",
+}
 
 
 @lru_cache
@@ -99,7 +110,7 @@ def _live_model_ids(provider: str) -> frozenset[str]:
 
 
 def _key_for(provider: str) -> str:
-    key = settings.anthropic_api_key if provider == "claude" else settings.openai_api_key
+    key = settings.key_for(provider)
     # The shipped .env.example uses obvious placeholders — treat those as unset.
     return "" if "xxxxxxxx" in key else key
 
@@ -132,14 +143,13 @@ def _resolve(cfg: ChatConfig, ctx: ClientContext) -> tuple[str, GenerationConfig
     provider = cfg.provider or settings.llm_provider
 
     if not _key_for(provider):
+        env_name = KEY_ENV_NAME.get(provider, f"{provider.upper()}_API_KEY")
         raise HTTPException(
             status_code=400,
-            detail=f"No API key for {provider} — set {KEY_ENV_NAME[provider]} in backend/.env",
+            detail=f"No API key for {provider} — set {env_name} in backend/.env",
         )
 
-    default_model = (
-        settings.anthropic_model if provider == "claude" else settings.openai_model
-    )
+    default_model = settings.model_for(provider)
     system = cfg.system_prompt or settings.system_prompt
     return provider, GenerationConfig(
         model=cfg.model or default_model,
@@ -148,6 +158,7 @@ def _resolve(cfg: ChatConfig, ctx: ClientContext) -> tuple[str, GenerationConfig
         effort=cfg.effort or settings.effort,
         web_search=cfg.web_search,
         search_backend=cfg.search_backend,
+        image_gen=cfg.image_gen,
         clarix=cfg.clarix,
         from_form=cfg.from_form,
     )
@@ -310,12 +321,21 @@ def chat(request: ChatRequest) -> ChatResponse:
         search_backend=gen.search_backend if gen.web_search else "",
     )
 
+    images = []
+    for img in result.images:
+        stored = save_image(img["b64"], output_format=img.get("output_format", "png"))
+        if stored:
+            stored["revised_prompt"] = img.get("revised_prompt", "")
+            stored["size"] = img.get("size", "")
+            images.append(stored)
+
     message_id = _persist_answer(
         session_id,
         content=result.text,
         thinking=result.thinking,
         provider=provider_name,
         model=gen.model,
+        images=images or None,
         metrics=metrics,
         input_tokens=result.input_tokens,
         output_tokens=result.output_tokens,
@@ -325,6 +345,7 @@ def chat(request: ChatRequest) -> ChatResponse:
     return ChatResponse(
         reply=result.text,
         thinking=result.thinking,
+        images=images,
         provider=provider_name,
         model=gen.model,
         input_tokens=result.input_tokens,
@@ -372,6 +393,7 @@ def chat_stream(request: ChatRequest) -> StreamingResponse:
         answer: list[str] = []
         thinking: list[str] = []
         trace: list[dict] = []
+        images: list[dict] = []
         search = None
         form = None
         metrics = None
@@ -394,6 +416,21 @@ def chat_stream(request: ChatRequest) -> StreamingResponse:
                 elif chunk.status:
                     search = chunk.status
                     yield _sse({"status": chunk.status})
+                elif chunk.image:
+                    # The bytes stop here. What reaches the browser is a URL
+                    # to a file on disk, which it can cache and which keeps
+                    # megabytes of base64 out of both the SSE stream and the
+                    # transcript row. A failed write is not fatal: the answer
+                    # is still worth sending without the picture.
+                    stored = save_image(
+                        chunk.image["b64"],
+                        output_format=chunk.image.get("output_format", "png"),
+                    )
+                    if stored:
+                        stored["revised_prompt"] = chunk.image.get("revised_prompt", "")
+                        stored["size"] = chunk.image.get("size", "")
+                        images.append(stored)
+                        yield _sse({"image": stored})
                 elif chunk.form:
                     # Only ever one per turn in practice — the tool exists to
                     # stop the model asking, and asking twice in one breath is
@@ -420,6 +457,7 @@ def chat_stream(request: ChatRequest) -> StreamingResponse:
             search=search,
             trace=trace or None,
             form=form,
+            images=images or None,
             metrics=metrics,
             input_tokens=usage.get("input_tokens"),
             output_tokens=usage.get("output_tokens"),
@@ -462,7 +500,23 @@ def _friendly(exc: Exception, provider: str) -> str:
     text = str(exc)
     low = text.lower()
     if "authentication" in low or "api key" in low or "401" in text:
-        return f"API key rejected — check {KEY_ENV_NAME[provider]} in backend/.env"
+        env_name = KEY_ENV_NAME.get(provider, f"{provider.upper()}_API_KEY")
+        return f"API key rejected — check {env_name} in backend/.env"
+    if "expecting value" in low or "response.completed" in low:
+        # The stream ended mid-flight. Only kie.ai does this, and only under
+        # load; the retries are already spent by the time we get here, so say
+        # what happened rather than showing a JSON parser's complaint.
+        return (
+            "The provider dropped the connection before finishing. "
+            "It retried and still failed — try again in a moment."
+        )
+    if "credits insufficient" in low or "top up" in low:
+        # kie.ai bills in prepaid credits, and an image costs many times what
+        # a sentence does — so this is the failure a drawing turn hits first.
+        return (
+            "Your kie.ai account is out of credits — top up at https://kie.ai "
+            "to keep using the GPT-6 models."
+        )
     if "rate" in low and "limit" in low:
         return "Rate limited by the provider. Wait a moment and try again."
     if "model" in low and ("not found" in low or "does not exist" in low):
@@ -542,8 +596,8 @@ def _detail(session, totals: dict) -> SessionDetail:
                     k: getattr(m, k)
                     for k in (
                         "id", "seq", "role", "content", "thinking", "provider",
-                        "model", "search", "trace", "form", "liked", "input_tokens",
-                        "output_tokens", "latency_ms", "thinking_ms",
+                        "model", "search", "trace", "form", "images", "liked",
+                        "input_tokens", "output_tokens", "latency_ms", "thinking_ms",
                         "incomplete", "error", "created_at",
                     )
                 },

@@ -75,6 +75,7 @@ def ensure_database() -> None:
 # Anything more (renames, backfills, dropped columns) wants Alembic.
 ADDED_COLUMNS = [
     ("messages", "form", "JSONB"),
+    ("messages", "images", "JSONB"),
     ("sessions", "clarix", "BOOLEAN NOT NULL DEFAULT TRUE"),
 ]
 

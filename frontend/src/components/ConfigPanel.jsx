@@ -91,11 +91,15 @@ export default function ConfigPanel({
   const model = provider.models.find((m) => m.id === config.model)
   const canEffort = model ? model.supports_effort : provider.supports_effort
   const canSearch = model ? model.supports_search : true
-  // Clarix runs in this process's own tool loop, which only the OpenAI
-  // provider has — Claude here declares Anthropic's hosted search and nothing
-  // else. The switch stays usable so the setting survives a provider swap,
-  // but the panel says plainly that it is doing nothing right now.
-  const isOpenAI = config.provider === 'openai'
+  // Drawing is a HOSTED tool — the provider generates the picture itself — so
+  // unlike search it cannot be offered on a model whose endpoint lacks it.
+  const canDraw = Boolean(model?.supports_images)
+  // Clarix runs in the backend's own tool loop, which the Responses API
+  // providers have — OpenAI and kie.ai, the latter being the same provider
+  // pointed at a different host. Claude here declares Anthropic's hosted
+  // search and nothing else. The switch stays usable so the setting survives
+  // a provider swap, but the panel says plainly when it is doing nothing.
+  const hasToolLoop = config.provider === 'openai' || config.provider === 'kie'
   const set = (patch) => onChange({ ...config, ...patch })
 
   function switchProvider(next) {
@@ -251,12 +255,43 @@ export default function ConfigPanel({
               </>
             )}
           </p>
-          {config.clarix && schema.clarix_configured && !isOpenAI && (
+          {config.clarix && schema.clarix_configured && !hasToolLoop && (
             <p className="field__hint field__hint--warn">
-              Only OpenAI runs these tools — on {provider.label} they are not offered,
-              whatever this says.
+              Only the Responses API providers run these tools — on {provider.label} they
+              are not offered, whatever this says.
             </p>
           )}
+        </section>
+
+        {/* ── Image generation ────────────────────────────────── */}
+        <section className={`field ${canDraw ? '' : 'field--off'}`}>
+          <label className="field__label">
+            Image generation
+            {!canDraw && <span className="field__tag">not on this model</span>}
+          </label>
+          <label className="toggle toggle--block">
+            <input
+              type="checkbox"
+              checked={Boolean(config.image_gen) && canDraw}
+              disabled={!canDraw}
+              onChange={(e) => set({ image_gen: e.target.checked })}
+            />
+            Let the model draw pictures
+          </label>
+          <p className="field__hint">
+            {canDraw ? (
+              <>
+                Drawn by the provider itself and returned as a finished PNG, so it
+                takes tens of seconds and costs far more than a sentence. Off by
+                default — a model offered the tool sometimes reaches for it uninvited.
+              </>
+            ) : (
+              <>
+                Only the GPT-6 models on kie.ai expose an image tool. Switch provider
+                to use this.
+              </>
+            )}
+          </p>
         </section>
 
         {/* ── Max tokens ──────────────────────────────────────── */}
@@ -329,15 +364,21 @@ export default function ConfigPanel({
             </strong>
           </div>
           <div className="readout__row">
+            <span>Images</span>
+            <strong>
+              {!canDraw ? 'not on this model' : config.image_gen ? 'can draw' : 'off'}
+            </strong>
+          </div>
+          <div className="readout__row">
             <span>Clarix</span>
             <strong>
               {!schema.clarix_configured
                 ? 'no key'
                 : !config.clarix
                   ? 'off'
-                  : isOpenAI
+                  : hasToolLoop
                     ? 'projects + tasks'
-                    : 'off (needs OpenAI)'}
+                    : `off (not on ${provider.label})`}
             </strong>
           </div>
           {usage && (

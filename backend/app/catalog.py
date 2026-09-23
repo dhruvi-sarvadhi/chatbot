@@ -138,6 +138,76 @@ OPENAI_MODELS = [
     },
 ]
 
+# kie.ai's Codex gateway, straight from its /models endpoint. Every model
+# there takes all five effort levels and accepts images — but none of them
+# return a reasoning SUMMARY (`default_reasoning_summary` is "none" and asking
+# for one changes nothing), so `supports_thinking` is False across the board
+# while `supports_effort` is True. The two flags are not the same question:
+# one is "does the dial work", the other is "do we get text to show".
+#
+# Search is our own function tool, run in this process, exactly as for OpenAI.
+#
+# `supports_images` is different in kind from the flags above it: it is not a
+# parameter the model accepts but a HOSTED tool the gateway runs, drawing with
+# gpt-image-2-codex and handing back finished PNG bytes. Verified working on
+# every model here.
+KIE_MODELS = [
+    {
+        "id": "gpt-6-astra",
+        "label": "GPT-6 Astra",
+        "hint": "Most capable — 272k context, 1M max",
+        "supports_effort": True,
+        "supports_thinking": False,
+        "supports_search": True,
+        "supports_images": True,
+    },
+    {
+        "id": "gpt-5-6-sol",
+        "label": "GPT-5.6 Sol",
+        "hint": "gpt-5-6 family — 272k context",
+        "supports_effort": True,
+        "supports_thinking": False,
+        "supports_search": True,
+        "supports_images": True,
+    },
+    {
+        "id": "gpt-5-6-terra",
+        "label": "GPT-5.6 Terra",
+        "hint": "gpt-5-6 family — 272k context",
+        "supports_effort": True,
+        "supports_thinking": False,
+        "supports_search": True,
+        "supports_images": True,
+    },
+    {
+        "id": "gpt-5-6-luna",
+        "label": "GPT-5.6 Luna",
+        "hint": "gpt-5-6 family — 272k context",
+        "supports_effort": True,
+        "supports_thinking": False,
+        "supports_search": True,
+        "supports_images": True,
+    },
+    {
+        "id": "gpt-5-5",
+        "label": "GPT-5.5",
+        "hint": "Previous flagship",
+        "supports_effort": True,
+        "supports_thinking": False,
+        "supports_search": True,
+        "supports_images": True,
+    },
+    {
+        "id": "gpt-5-4",
+        "label": "GPT-5.4",
+        "hint": "Long context — 1M max",
+        "supports_effort": True,
+        "supports_thinking": False,
+        "supports_search": True,
+        "supports_images": True,
+    },
+]
+
 PROVIDERS = {
     "claude": {
         "label": "Claude",
@@ -151,6 +221,14 @@ PROVIDERS = {
         "label": "OpenAI",
         "vendor": "OpenAI",
         "models": OPENAI_MODELS,
+        "supports_effort": True,
+    },
+    "kie": {
+        "label": "GPT-6",
+        # Named for where the request actually goes, not for who trained the
+        # model — the key, the billing and the outage page are all kie.ai's.
+        "vendor": "kie.ai",
+        "models": KIE_MODELS,
         "supports_effort": True,
     },
 }

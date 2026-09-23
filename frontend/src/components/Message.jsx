@@ -11,9 +11,19 @@ import ToolForm from './ToolForm.jsx'
 // answered, so the row itself reports which one ran and how long it took.
 function describeSearch(state) {
   if (state === 'searching') return 'Searching the web…'
+  if (state === 'drawing') return 'Drawing…'
+  if (state === 'drew') return 'Image generated'
   const [, backend, ms] = state.split(':')
   if (!backend) return 'Searched the web'
   return `Searched via ${backend} · ${(Number(ms) / 1000).toFixed(1)}s`
+}
+
+// Drawing borrows the search row rather than adding a second status line —
+// both answer the same question ("what is it doing during this pause?").
+const DRAWING = new Set(['drawing', 'drew'])
+
+function glyphFor(state) {
+  return DRAWING.has(state) ? '🎨' : '🌐'
 }
 
 export default function Message({
@@ -28,6 +38,7 @@ export default function Message({
   formState,
   onFormSubmit,
   onFormCancel,
+  images,
   attachments,
   thinking,
   thinkingActive,
@@ -47,7 +58,10 @@ export default function Message({
   // until the first thinking / search / answer event it has nothing to show.
   // Rendering it anyway would put a second avatar above the typing dots,
   // which are already the indicator for exactly this moment.
-  if (!isUser && pending && !content && !thinking && !search && !trace?.length && !form)
+  if (
+    !isUser && pending && !content && !thinking && !search && !trace?.length && !form
+    && !images?.length
+  )
     return null
 
   return (
@@ -72,14 +86,44 @@ export default function Message({
         {/* Reasoning sits above the answer because that is the order it
             happened in — the model thought, then it wrote. */}
         {!isUser && search && (
-          <div className={`search ${search === 'searching' ? 'search--live' : ''}`}>
-            <span className="search__glyph" aria-hidden="true">🌐</span>
+          <div
+            className={`search ${DRAWING.has(search) ? 'search--draw' : ''} ${
+              search === 'searching' || search === 'drawing' ? 'search--live' : ''
+            }`}
+          >
+            <span className="search__glyph" aria-hidden="true">{glyphFor(search)}</span>
             {describeSearch(search)}
           </div>
         )}
 
         {!isUser && (
           <Reasoning text={thinking} active={thinkingActive} ms={thinkingMs} />
+        )}
+
+        {images?.length > 0 && (
+          <div className="drawn">
+            {images.map((img, i) => (
+              <figure key={img.url ?? i} className="drawn__item">
+                {/* Opens full size in a new tab — the bubble is far narrower
+                    than the 1536px the model draws at. */}
+                <a href={img.url} target="_blank" rel="noreferrer">
+                  <img
+                    className="drawn__img"
+                    src={img.url}
+                    alt={img.revised_prompt || 'Generated image'}
+                    loading="lazy"
+                  />
+                </a>
+                {/* What the model actually asked for, which is rarely what the
+                    user typed — it explains why the picture looks as it does. */}
+                {img.revised_prompt && (
+                  <figcaption className="drawn__prompt">
+                    <Clamped text={img.revised_prompt} />
+                  </figcaption>
+                )}
+              </figure>
+            ))}
+          </div>
         )}
 
         {/* No bubble until there is something in it. While the answer is
@@ -90,7 +134,8 @@ export default function Message({
             {/* The user's own text is shown verbatim (and capped, with a
                 Show more toggle); only model replies are parsed as markdown. */}
             {isUser ? <Clamped text={content} /> : <Markdown>{content}</Markdown>}
-            {pending && !thinkingActive && search !== 'searching' && <span className="caret" />}
+            {pending && !thinkingActive && search !== 'searching' && search !== 'drawing'
+              && <span className="caret" />}
           </div>
         )}
 

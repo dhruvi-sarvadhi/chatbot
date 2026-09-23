@@ -136,6 +136,11 @@ class ChatMessage(Base):
     # card that was actually filled in, not a reply referring to a missing one.
     form: Mapped[dict | None] = mapped_column(JSONB)
 
+    # Images the model generated for this answer: [{"url", "bytes", ...}].
+    # URLs, not bytes — the files themselves live under backend/media/, so a
+    # transcript query stays small no matter how many pictures it contains.
+    images: Mapped[list | None] = mapped_column(JSONB)
+
     liked: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
 
     input_tokens: Mapped[int | None] = mapped_column(Integer)

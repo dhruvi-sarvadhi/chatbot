@@ -15,3 +15,6 @@ frontend/dist/
 .DS_Store
 .vscode/
 backend/.env.bak.1787991353
+
+# Generated images — files on disk, not source
+backend/media/

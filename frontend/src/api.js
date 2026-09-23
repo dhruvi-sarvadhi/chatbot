@@ -61,6 +61,9 @@ export async function sendChat(messages, config, sessionId = null) {
  *                      and only when it actually reasoned for this request)
  *   onStatus(what)  — "searching" / "searched": the model is looking
  *                     something up on the web
+ *   onImage(img)    — the model finished drawing a picture:
+ *                     {url, size, bytes, revised_prompt}. Arrives the moment
+ *                     that image is done, before any caption the model writes
  *   onTrace(step)   — one entry of the agent loop, for the debug panel
  *   onForm(spec)    — the model wants details it does not have, and asked for
  *                     them as a form: render it and send the answers back as
@@ -79,7 +82,9 @@ export async function streamChat(
   messages,
   config,
   sessionId = null,
-  { onDelta, onMeta, onUsage, onThinking, onStatus, onTrace, onForm, onSaved } = {},
+  {
+    onDelta, onMeta, onUsage, onThinking, onStatus, onTrace, onForm, onImage, onSaved,
+  } = {},
 ) {
   const res = await fetch(`${BASE}/chat/stream`, {
     method: 'POST',
@@ -113,6 +118,7 @@ export async function streamChat(
       if (event.trace) onTrace?.(event.trace)
       if (event.status) onStatus?.(event.status)
       if (event.form) onForm?.(event.form)
+      if (event.image) onImage?.(event.image)
       if (event.thinking) onThinking?.(event.thinking)
       if (event.delta) onDelta?.(event.delta)
       if (event.meta) onMeta?.(event.meta)

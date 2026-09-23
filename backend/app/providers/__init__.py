@@ -33,4 +33,14 @@ def get_provider(name: str) -> ChatProvider:
             default_model=settings.openai_model,
         )
 
+    if name == "kie":
+        # A subclass of OpenAIProvider — same Responses API, different host.
+        from .kie_provider import KieProvider
+
+        return KieProvider(
+            api_key=settings.kie_api_key,
+            default_model=settings.kie_model,
+            base_url=settings.kie_base_url,
+        )
+
     raise ValueError(f"Unknown provider: {name}")

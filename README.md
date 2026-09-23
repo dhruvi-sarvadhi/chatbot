@@ -95,15 +95,110 @@ psql -d chatbot -c "SELECT model, sum(input_tokens), sum(output_tokens), sum(cos
 In `backend/.env`:
 
 ```ini
-LLM_PROVIDER=claude           # or: openai
+LLM_PROVIDER=claude           # or: openai, kie
 ANTHROPIC_API_KEY=sk-ant-...  # https://console.anthropic.com/settings/keys
 ANTHROPIC_MODEL=claude-opus-5
 # OPENAI_API_KEY=sk-...       # https://platform.openai.com/api-keys
 # OPENAI_MODEL=gpt-4o-mini
+# KIE_API_KEY=...             # https://kie.ai
+# KIE_MODEL=gpt-6-astra
 ```
 
 Change `LLM_PROVIDER`, restart the server, and the same UI now talks to the
-other provider. No frontend change is needed.
+other provider. No frontend change is needed. Any provider with a key also
+appears as a button in the configuration panel, so you can switch per-message
+without touching `.env`.
+
+### GPT-6 Astra, via kie.ai
+
+`kie` is a third provider: [kie.ai](https://kie.ai) re-publishes OpenAI's
+Responses API at `https://api.kie.ai/codex/v1`, which puts the Codex-tier
+models — **GPT-6 Astra** (272k context, 1M maximum) and the `gpt-5-6` family —
+behind one flat key, with no OpenAI account and no per-token billing.
+
+Because the wire format is identical, this is not a new integration so much as
+the existing one pointed elsewhere:
+[kie_provider.py](backend/app/providers/kie_provider.py) is a ~20-line subclass
+of the OpenAI provider. The whole agent loop comes along unchanged — the
+`web_search` function tool and its backend picker, the Clarix project tools,
+the form card, the agent trace, per-turn token metrics.
+
+```ini
+KIE_API_KEY=your-kie-key
+KIE_MODEL=gpt-6-astra
+KIE_BASE_URL=https://api.kie.ai/codex/v1   # note /codex/v1, not /v1
+```
+
+Three things about the gateway differ from OpenAI proper, and all three are
+handled in `kie_provider.py`:
+
+| Quirk | What it means here |
+|---|---|
+| It streams by default | A plain `create()` returns `text/event-stream` and the SDK hands back a raw string. The provider pins `stream=False` on the non-streamed path. |
+| No reasoning summaries | The models reason and bill for it, and all five effort levels work, but no summary text ever comes back. So the catalog marks them `supports_effort` without `supports_thinking` — the effort dial is live, the Reasoning pane stays empty. |
+| `max_output_tokens` is ignored | Echoed back as `null`. Harmless; still sent. |
+
+kie.ai also exposes OpenAI's *hosted* `{"type": "web_search"}` tool on these
+models. It works, but it hides the loop and takes the backend choice away —
+which is the opposite of what the agent trace is for — so search here stays the
+same in-process function tool the OpenAI provider uses.
+
+### Image generation
+
+These models can draw. Turn on **Image generation** in the panel and the
+request carries one more tool:
+
+```json
+{"type": "image_generation"}
+```
+
+This is the one hosted tool the app does use, because there is no alternative:
+the picture is drawn on kie.ai's servers with `gpt-image-2-codex` and arrives
+already finished, as an `image_generation_call` block holding base64 PNG. So
+unlike `web_search` and `clarix_projects` it never reaches the tool loop —
+there is nothing local to run. The provider just watches for the block.
+
+A generated PNG is around 3 MB, which is the wrong thing to put in a database
+column: every transcript query would drag megabytes across for a picture the
+browser can fetch once and cache. So the bytes stop at `main.py`, which writes
+them to `backend/media/` (filename = a hash of the content, so duplicates are
+stored once) and puts only a short URL in the message row. The files are served
+read-only from `/media`, which `vite.config.js` proxies in development exactly
+as it proxies `/api`.
+
+What you get in the transcript is the picture, then the **revised prompt** — the
+much longer description the model actually sent to the image model, which is
+what explains why the result looks the way it does — then whatever caption it
+wrote.
+
+> **Billing is where this bites first.** kie.ai runs on prepaid credits and an
+> image costs many times what a sentence does, so a drawing turn is what
+> empties the balance. When it does, the gateway answers **HTTP 200** with its
+> own envelope — `{"code": 402, "msg": "Credits insufficient …"}` — rather than
+> a status code, on both the streamed and non-streamed endpoints. Untouched,
+> the SDK parses that into an empty `Response` and the first symptom is a
+> `TypeError` on a null `output`, which points nowhere near the real cause.
+> `KieProvider._check` and `._stream_refusal` catch it on each path and the UI
+> says plainly that you are out of credits.
+>
+> **Streaming is also the flakier transport.** Under load kie.ai drops long
+> streams, and its error frames are malformed SSE (two `event: error` lines
+> sharing one `data:`), so the SDK dies on `json.loads("")` and raises a bare
+> `JSONDecodeError` or a `RuntimeError` about a missing terminal event.
+> Two defences, in this order:
+>
+> * If the model already produced output before the drop, the turn is
+>   **salvaged** from the `response.output_item.done` events rather than
+>   retried — an image that has been drawn has been paid for, and retrying
+>   would buy a second copy. The trace says `Stream ended early — kept what
+>   arrived`; the only casualty is the token count, which never arrives.
+> * If nothing arrived, it retries — but a *refusal* (credits, a rejected
+>   request) is detected before the stream is read and is never retried, since
+>   it will not come true on the second attempt.
+
+Off by default, and deliberately: an image costs far more than a sentence and
+takes tens of seconds, and a model that is offered the tool will sometimes
+reach for it uninvited.
 
 ## 2. Frontend setup
 
@@ -314,10 +409,10 @@ never offered to the model.
 > previously-working key that starts returning `401 INVALID_TOKEN` has usually
 > been rotated, not revoked — `clarix_smoke.py` says which.
 
-> **Provider support:** wired into the **OpenAI** provider, which already runs
-> tools in this process. The Claude provider only declares Anthropic's
-> *server-side* web search and has no local tool loop, so set
-> `LLM_PROVIDER=openai` to use this.
+> **Provider support:** wired into the Responses API providers — **OpenAI** and
+> **kie** — which run tools in this process. The Claude provider only declares
+> Anthropic's *server-side* web search and has no local tool loop, so set
+> `LLM_PROVIDER=openai` (or `kie`) to use this.
 
 ---
 
@@ -368,7 +463,9 @@ the handle hides itself.
 | [frontend/src/components/ToolForm.jsx](frontend/src/components/ToolForm.jsx) | Renders that form, and turns the answers back into a message |
 | [backend/clarix_smoke.py](backend/clarix_smoke.py) | Prove the Clarix key works without an LLM in the way |
 | [backend/app/providers/claude.py](backend/app/providers/claude.py) | The actual Anthropic API call |
-| [backend/app/providers/openai_provider.py](backend/app/providers/openai_provider.py) | The actual OpenAI API call |
+| [backend/app/providers/openai_provider.py](backend/app/providers/openai_provider.py) | The actual OpenAI API call, and the tool loop both Responses providers share |
+| [backend/app/providers/kie_provider.py](backend/app/providers/kie_provider.py) | GPT-6 Astra via kie.ai — the same provider, four gateway quirks |
+| [backend/app/media.py](backend/app/media.py) | Where generated images go, and why they are files rather than rows |
 | [backend/app/main.py](backend/app/main.py) | HTTP routes, CORS, SSE streaming |
 | [frontend/src/api.js](frontend/src/api.js) | `fetch` calls, including SSE parsing |
 | [frontend/src/App.jsx](frontend/src/App.jsx) | Conversation state and the chat flow |

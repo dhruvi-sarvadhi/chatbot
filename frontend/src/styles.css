@@ -979,8 +979,52 @@ body.is-resizing .layout { transition: none; }
   to   { transform: rotate(360deg); }
 }
 
+/* The globe spins while a search runs; a spinning palette would read as an
+   error, so drawing pulses instead. */
+.search--draw.search--live .search__glyph {
+  animation: draw-pulse 1.4s ease-in-out infinite;
+}
+
+@keyframes draw-pulse {
+  0%, 100% { opacity: 1; transform: scale(1); }
+  50%      { opacity: 0.55; transform: scale(0.88); }
+}
+
 @media (prefers-reduced-motion: reduce) {
   .search--live .search__glyph { animation: none; }
+  .search--draw.search--live .search__glyph { animation: none; }
+}
+
+/* ── Generated images ─────────────────────────────────────────────────────
+   The model draws at up to 1536px; the bubble is a fraction of that, so the
+   picture is scaled to the column and opens full size in a new tab. */
+.drawn {
+  align-self: flex-start;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  max-width: 100%;
+}
+
+.drawn__item {
+  margin: 0;
+  max-width: 460px;
+}
+
+.drawn__img {
+  display: block;
+  width: 100%;
+  height: auto;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  background: var(--panel);
+}
+
+.drawn__prompt {
+  margin-top: 6px;
+  font-size: 12px;
+  line-height: 1.45;
+  color: var(--muted);
 }
 
 .toggle--block { display: flex; gap: 8px; align-items: center; margin-bottom: 6px; }
